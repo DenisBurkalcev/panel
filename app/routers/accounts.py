@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from app.crypto import encrypt_str
 from app.db import get_db
 from app.models.account import Account
-from app.models.user import AdminUser
 from app.schemas.account import (
     AccountCheckResult,
     AccountCreate,
@@ -153,6 +152,3 @@ async def check_account(
         funpay_username=a.funpay_username,
         error=None if ok else err,
     )
-
-# Note for AdminUser unused-imported reviewers: dependency is referenced via Depends().
-_ = AdminUser

@@ -17,7 +17,6 @@ class LoginRequest(BaseModel):
 
 class MeResponse(BaseModel):
     username: str
-    setup_complete: bool = True
 
 
 class SetupStatusResponse(BaseModel):

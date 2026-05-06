@@ -65,6 +65,12 @@ _ALLOWED_EXTS = {
 _MAX_PLUGIN_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB compressed
 _MAX_DECOMPRESSED_BYTES = 25 * 1024 * 1024  # 25 MB decompressed
 _MAX_FILES_PER_PLUGIN = 200
+_MAX_PATH_LEN = 200
+# Unix file modes are stored in the upper 16 bits of `external_attr`.
+# 0o120000 marks a symlink — zip files generated on Linux/macOS may legally
+# include symlinks; we always reject them to prevent escape via
+# /tmp/<dest>/inner -> /etc/passwd style tricks.
+_S_IFLNK_SHIFTED = 0o120000 << 16
 
 
 class PluginInstallError(ValueError):
@@ -271,31 +277,48 @@ class PluginRegistry:
 
             # Strip a single common top-level directory if any.
             common_root = _common_top_dir([m.filename for m in members])
-            decompressed_bytes = 0
+            decompressed_remaining = _MAX_DECOMPRESSED_BYTES
             entries: list[tuple[str, bytes]] = []
             for member in members:
                 if member.is_dir():
                     continue
+                # Reject symlinks regardless of host OS — the unix mode bits
+                # for symlinks are reliable on archives created by zip(1).
+                if (member.external_attr & _S_IFLNK_SHIFTED) == _S_IFLNK_SHIFTED:
+                    raise PluginInstallError(
+                        f"Refusing symlink entry {member.filename!r}"
+                    )
                 rel = member.filename
                 if common_root:
                     rel = rel[len(common_root) :]
                 rel = rel.lstrip("/").replace("\\", "/")
                 if not rel:
                     continue
+                if "\x00" in rel or any(ord(c) < 0x20 for c in rel):
+                    raise PluginInstallError(
+                        f"Refusing control characters in path {member.filename!r}"
+                    )
+                if len(rel) > _MAX_PATH_LEN:
+                    raise PluginInstallError(f"Path too long: {rel!r}")
                 if ".." in Path(rel).parts:
                     raise PluginInstallError(f"Refusing path traversal in {member.filename!r}")
                 if Path(rel).is_absolute():
                     raise PluginInstallError(f"Refusing absolute path {member.filename!r}")
                 if member.file_size > _MAX_DECOMPRESSED_BYTES:
                     raise PluginInstallError(f"File {rel!r} too large")
-                decompressed_bytes += member.file_size
-                if decompressed_bytes > _MAX_DECOMPRESSED_BYTES:
-                    raise PluginInstallError("Decompressed plugin exceeds size limit")
                 ext = Path(rel).suffix.lower()
                 if ext and ext not in _ALLOWED_EXTS:
                     raise PluginInstallError(f"File extension {ext!r} not allowed")
+                # Stream-decompress so a lying header (file_size says 100,
+                # actual contents 1 GB) can't OOM the panel: cap the read at
+                # decompressed_remaining + 1 and refuse if we hit the cap.
+                limit = decompressed_remaining + 1
                 with zf.open(member) as fh:
-                    entries.append((rel, fh.read()))
+                    data = fh.read(limit)
+                if len(data) > decompressed_remaining:
+                    raise PluginInstallError("Decompressed plugin exceeds size limit")
+                decompressed_remaining -= len(data)
+                entries.append((rel, data))
 
             manifest_blob = next((b for n, b in entries if n == "plugin.json"), None)
             if manifest_blob is None:

@@ -15,6 +15,8 @@ from app.schemas.auth import (
     SetupStatusResponse,
 )
 from app.security import (
+    SESSION_COOKIE,
+    check_same_origin,
     clear_csrf_cookie,
     clear_session_cookie,
     get_current_user,
@@ -41,23 +43,25 @@ def status_(db: Session = Depends(get_db)) -> SetupStatusResponse:
     return SetupStatusResponse(setup_complete=_setup_complete(db))
 
 
-@router.post("/setup", status_code=status.HTTP_201_CREATED, response_model=MeResponse)
+@router.post(
+    "/setup",
+    status_code=status.HTTP_201_CREATED,
+    response_model=MeResponse,
+    dependencies=[Depends(check_same_origin)],
+)
 def setup(
     payload: SetupRequest,
     response: Response,
-    request: Request,
     db: Session = Depends(get_db),
 ) -> MeResponse:
-    """First-run admin creation. Disabled once a user exists."""
-    # NOTE: setup runs *before* a session/CSRF cookie can be issued, so we don't enforce
-    # CSRF here. We do enforce same-origin on every other state-changing endpoint.
+    """First-run admin creation. Disabled once a user exists.
+
+    CSRF is intentionally NOT enforced here — the cookie isn't set yet on the
+    very first call. We do enforce a same-origin check via `check_same_origin`
+    so a random tab can't bootstrap an admin user against the local panel.
+    """
     if _setup_complete(db):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Setup already complete")
-    if request.headers.get("origin") and request.headers["origin"].rstrip("/") != (
-        request.url.scheme + "://" + request.url.netloc
-    ):
-        # Minimal sanity check for setup.
-        pass
     user = AdminUser(username=payload.username, password_hash=hash_password(payload.password))
     db.add(user)
     db.commit()
@@ -102,7 +106,7 @@ def logout(
     response: Response,
     _: AdminUser = Depends(get_current_user),
 ) -> dict[str, bool]:
-    sid = request.cookies.get("fpk_session")
+    sid = request.cookies.get(SESSION_COOKIE)
     if sid:
         session_store.revoke(sid)
     clear_session_cookie(response)

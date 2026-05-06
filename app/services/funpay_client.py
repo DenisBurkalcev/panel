@@ -215,8 +215,14 @@ class FunPayClient:
         except httpx.HTTPError as exc:
             raise FunPayError(f"Network error talking to FunPay: {exc}") from exc
 
+        if resp.status_code in (401, 403):
+            raise FunPayAuthError(
+                f"FunPay refused the home page ({resp.status_code}) — golden_key likely invalid."
+            )
         if resp.status_code >= 500:
             raise FunPayError(f"FunPay returned HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            raise FunPayError(f"FunPay returned HTTP {resp.status_code} for /")
         html = resp.text
         if "data-app-data" not in html:
             raise FunPayAuthError("FunPay didn't recognise the golden_key (not logged in).")
@@ -433,12 +439,11 @@ class FunPayClient:
         if error_text:
             # Common cause: stale CSRF token. Re-fetch and retry once.
             if "csrf" in str(error_text).lower():
-                await self.fetch_profile(force=True)
-                request["data"]["node"] = coerced  # type: ignore[index]
+                refreshed = await self.fetch_profile(force=True)
                 body = await self._runner_post(
                     objects=objects,
                     request=request,
-                    csrf=self._profile.csrf_token if self._profile else profile.csrf_token,
+                    csrf=refreshed.csrf_token,
                     referer=f"/chat/?node={coerced}",
                 )
                 response_obj = body.get("response") or {}

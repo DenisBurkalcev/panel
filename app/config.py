@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,14 +21,37 @@ MASTER_KEY_FILE = DATA_DIR / ".master.key"
 PLUGINS_INSTALLED_DIR = PROJECT_ROOT / "plugins-installed"
 PLUGINS_INSTALLED_DIR.mkdir(parents=True, exist_ok=True)
 
+# Master key: 32 random bytes encoded as hex (64 hex chars). The validator
+# accepts a slightly broader range for legacy reasons but new keys are always
+# 64 hex chars.
+_MIN_KEY_CHARS = 32
+_NEW_KEY_BYTES = 32
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+log = logging.getLogger("funpay.config")
+
 
 def _ensure_master_key() -> str:
-    """Return a hex-encoded 32-byte master key, generating one on first run."""
+    """Return a hex-encoded 32-byte master key, generating one on first run.
+
+    The key file is treated as **the** source of truth for at-rest encryption:
+    if it exists but contains a value that's clearly invalid (too short or
+    non-hex), we refuse to silently generate a new one — that would orphan
+    every previously encrypted secret in the DB. The operator must either
+    repair the file or delete it on purpose.
+    """
     if MASTER_KEY_FILE.exists():
         key = MASTER_KEY_FILE.read_text(encoding="ascii").strip()
-        if len(key) >= 32:
+        if len(key) >= _MIN_KEY_CHARS and _HEX_RE.match(key):
             return key
-    key = secrets.token_hex(32)
+        raise RuntimeError(
+            f"Master key file {MASTER_KEY_FILE} exists but is invalid "
+            f"(expected hex of at least {_MIN_KEY_CHARS} chars). Refusing to "
+            "regenerate — that would corrupt every previously encrypted secret. "
+            "Repair the file from a backup, or delete it on purpose to start "
+            "from scratch."
+        )
+    key = secrets.token_hex(_NEW_KEY_BYTES)
     MASTER_KEY_FILE.write_text(key, encoding="ascii")
     try:
         MASTER_KEY_FILE.chmod(0o600)
@@ -64,17 +90,39 @@ class Settings(BaseSettings):
             "Chrome/124.0.0.0 Safari/537.36"
         )
     )
-    funpay_request_timeout_seconds: float = Field(default=20.0)
+    funpay_request_timeout_seconds: float = Field(default=20.0, gt=0)
 
     @field_validator("secret_key", mode="before")
     @classmethod
     def _resolve_secret_key(cls, value: str | None) -> str:
         if value:
             v = str(value).strip()
-            if len(v) < 32:
-                raise ValueError("FPK_SECRET_KEY must be at least 32 characters (hex of 32 bytes).")
+            if len(v) < _MIN_KEY_CHARS:
+                raise ValueError(
+                    f"FPK_SECRET_KEY must be at least {_MIN_KEY_CHARS} characters "
+                    "(hex of 32 bytes — generate with "
+                    "`python -c 'import secrets;print(secrets.token_hex(32))'`)."
+                )
+            if not _HEX_RE.match(v):
+                # Soft-warn rather than reject so existing deployments with
+                # passphrase-style keys keep working.
+                log.warning(
+                    "FPK_SECRET_KEY is not pure hex; recommended format is "
+                    "64 hex chars (output of `secrets.token_hex(32)`)."
+                )
             return v
         return _ensure_master_key()
+
+    @field_validator("allowed_origin")
+    @classmethod
+    def _v_allowed_origin(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(
+                "FPK_ALLOWED_ORIGIN must be a full http(s) origin, e.g. http://127.0.0.1:8000"
+            )
+        return v
 
     @field_validator("host")
     @classmethod

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   ApiError,
@@ -126,28 +126,34 @@ function ChatList({
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function load(force: boolean) {
-    setBusy(true);
-    setErr(null);
-    try {
-      const url = `/api/accounts/${accountId}/chats${force ? "?fresh=true" : ""}`;
-      setChats(await api.get<ChatPreview[]>(url));
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const load = useCallback(
+    async (force: boolean) => {
+      setBusy(true);
+      setErr(null);
+      try {
+        const url = `/api/accounts/${accountId}/chats${force ? "?fresh=true" : ""}`;
+        setChats(await api.get<ChatPreview[]>(url));
+      } catch (e) {
+        setErr(e instanceof ApiError ? e.detail : String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [accountId]
+  );
 
   useEffect(() => {
     void load(false);
     // Poll the chat list often enough that new threads (or new last-message
     // previews) appear without forcing the operator to click Refresh. The
-    // backend `_CHAT_LIST_TTL` keeps this from hammering FunPay.
-    const id = window.setInterval(() => void load(false), 10_000);
+    // backend `_CHAT_LIST_TTL` keeps this from hammering FunPay. Skip ticks
+    // while the tab is hidden so a backgrounded panel doesn't pin a CPU.
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void load(false);
+    }, 10_000);
     return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  }, [load]);
 
   return (
     <div className="card flex min-h-0 flex-col gap-3">
@@ -223,19 +229,22 @@ function ChatPane({
   // poll tick. Initial value is `true` so the first render pins to bottom.
   const stickToBottomRef = useRef(true);
 
-  async function load(force: boolean) {
-    if (chatId === null) return;
-    try {
-      const url = `/api/accounts/${accountId}/chats/${encodeURIComponent(chatId)}${
-        force ? "?fresh=true" : ""
-      }`;
-      const t = await api.get<ChatThread>(url);
-      setThread(t);
-      setErr(null);
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.detail : String(e));
-    }
-  }
+  const load = useCallback(
+    async (force: boolean) => {
+      if (chatId === null) return;
+      try {
+        const url = `/api/accounts/${accountId}/chats/${encodeURIComponent(chatId)}${
+          force ? "?fresh=true" : ""
+        }`;
+        const t = await api.get<ChatThread>(url);
+        setThread(t);
+        setErr(null);
+      } catch (e) {
+        setErr(e instanceof ApiError ? e.detail : String(e));
+      }
+    },
+    [accountId, chatId]
+  );
 
   useEffect(() => {
     setThread(null);
@@ -243,11 +252,15 @@ function ChatPane({
     if (chatId === null) return;
     void load(false);
     // 3s poll keeps incoming buyer messages flowing into the open thread
-    // without manual refresh; backend `_THREAD_TTL` is tuned to match.
-    const id = window.setInterval(() => void load(false), 3_000);
+    // without manual refresh; backend `_THREAD_TTL` is tuned to match. Pause
+    // polling while the tab is hidden so we don't generate FunPay traffic
+    // for a panel nobody is looking at.
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void load(false);
+    }, 3_000);
     return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, chatId]);
+  }, [load, chatId]);
 
   useEffect(() => {
     const el = messagesRef.current;

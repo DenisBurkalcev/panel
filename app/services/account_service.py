@@ -8,11 +8,15 @@ from app.crypto import decrypt_str
 from app.models.account import Account
 from app.security import utcnow
 from app.services.funpay_client import (
-    FunPayAuthError,
     FunPayClient,
     FunPayCredentials,
     FunPayError,
 )
+
+# Truncate FunPay error messages we persist to the DB so a verbose stack-trace
+# (which can happen on httpx connection errors) doesn't blow past the column
+# limit. The model declares `last_check_error` as `String(500)`.
+_ERROR_TRUNC_LEN = 480
 
 
 def credentials_for(account: Account) -> FunPayCredentials:
@@ -29,16 +33,10 @@ async def probe_account(account: Account, db: Session) -> tuple[bool, str | None
     try:
         async with FunPayClient(credentials_for(account)) as client:
             profile = await client.fetch_profile()
-    except FunPayAuthError as exc:
-        account.last_check_ok = False
-        account.last_check_error = str(exc)[:480]
-        account.last_checked_at = utcnow()
-        db.add(account)
-        db.commit()
-        return False, str(exc)
     except FunPayError as exc:
+        # FunPayAuthError is a subclass of FunPayError so this catches both.
         account.last_check_ok = False
-        account.last_check_error = str(exc)[:480]
+        account.last_check_error = str(exc)[:_ERROR_TRUNC_LEN]
         account.last_checked_at = utcnow()
         db.add(account)
         db.commit()

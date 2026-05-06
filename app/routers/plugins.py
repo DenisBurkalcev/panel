@@ -9,6 +9,13 @@ from app.plugins.registry import PluginInfo as PluginRegistryInfo
 from app.plugins.registry import PluginInstallError, get_plugin_registry
 from app.security import get_current_user, require_csrf
 
+# Hard cap on the upload size enforced at the HTTP layer so a malicious client
+# can't stream gigabytes into the panel before the registry's own 5 MB cap
+# rejects the request. We allow a small overhead (~64 KB) on top of the
+# registry limit to give a clean error message rather than a connection drop.
+_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 + 64 * 1024
+_UPLOAD_CHUNK = 64 * 1024
+
 router = APIRouter(
     prefix="/api/plugins",
     tags=["plugins"],
@@ -55,7 +62,20 @@ def list_plugins(refresh: bool = False) -> list[PluginOut]:
     dependencies=[Depends(require_csrf)],
 )
 async def install_plugin(file: UploadFile = File(...)) -> PluginOut:
-    blob = await file.read()
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Plugin upload exceeds the maximum allowed size",
+            )
+        chunks.append(chunk)
+    blob = b"".join(chunks)
     try:
         info = get_plugin_registry().install(filename=file.filename or "plugin", blob=blob)
     except PluginInstallError as exc:

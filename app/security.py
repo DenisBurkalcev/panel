@@ -4,12 +4,14 @@ Design notes (OWASP ASVS-aligned):
 - Passwords hashed with Argon2id (`argon2-cffi`), with per-hash random salts.
 - Session id is a 256-bit random token, stored in an HttpOnly + SameSite=Strict cookie.
   The mapping `session_id -> user_id` lives in-memory (single-process server). Sessions
-  expire after `session_max_age_seconds` of inactivity.
+  expire after `session_max_age_seconds` of inactivity and are pruned opportunistically
+  to keep the in-memory map bounded over long-running processes.
 - CSRF: synchronizer-token pattern. A 256-bit token is set in a non-HttpOnly cookie
   named `fpk_csrf` and must be echoed via the `X-CSRF-Token` header on any state-
   changing request (POST/PUT/PATCH/DELETE). The server also enforces a strict
   Origin/Referer check against `FPK_ALLOWED_ORIGIN`.
 - Login throttle: simple sliding-window per-IP limiter to mitigate online brute force.
+  Empty buckets are pruned on every hit so the keyspace can't grow without bound.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Final
+from typing import Any, Final
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -37,6 +39,10 @@ _SETTINGS = get_settings()
 SESSION_COOKIE: Final[str] = _SETTINGS.session_cookie_name
 CSRF_COOKIE: Final[str] = _SETTINGS.csrf_cookie_name
 CSRF_HEADER: Final[str] = "X-CSRF-Token"
+
+# Prune expired sessions / empty rate-limit buckets at most once per this many
+# seconds, regardless of how many requests come in.
+_PRUNE_INTERVAL_SECONDS = 60.0
 
 
 def hash_password(plain: str) -> str:
@@ -69,12 +75,14 @@ class SessionStore:
         self._max_age = max_age_seconds
         self._lock = RLock()
         self._sessions: dict[str, SessionRecord] = {}
+        self._last_prune = 0.0
 
     def create(self, user_id: int) -> str:
         sid = secrets.token_urlsafe(32)
         now = time.time()
         with self._lock:
             self._sessions[sid] = SessionRecord(user_id=user_id, created_at=now, last_seen=now)
+            self._maybe_prune(now)
         return sid
 
     def get(self, sid: str) -> SessionRecord | None:
@@ -89,6 +97,7 @@ class SessionStore:
                 self._sessions.pop(sid, None)
                 return None
             rec.last_seen = now
+            self._maybe_prune(now)
             return rec
 
     def revoke(self, sid: str) -> None:
@@ -103,6 +112,16 @@ class SessionStore:
             for sid, rec in list(self._sessions.items()):
                 if rec.user_id == user_id:
                     self._sessions.pop(sid, None)
+
+    def _maybe_prune(self, now: float) -> None:
+        # Caller must hold `self._lock`.
+        if now - self._last_prune < _PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_prune = now
+        cutoff = now - self._max_age
+        for sid, rec in list(self._sessions.items()):
+            if rec.last_seen < cutoff:
+                self._sessions.pop(sid, None)
 
 
 session_store = SessionStore(_SETTINGS.session_max_age_seconds)
@@ -121,6 +140,7 @@ class RateLimiter:
         self._window = window_seconds
         self._lock = RLock()
         self._buckets: dict[str, _Bucket] = defaultdict(_Bucket)
+        self._last_prune = 0.0
 
     def hit(self, key: str) -> bool:
         """Return True if the request is allowed; False if rate-limited."""
@@ -130,10 +150,24 @@ class RateLimiter:
             cutoff = now - self._window
             while bucket.timestamps and bucket.timestamps[0] < cutoff:
                 bucket.timestamps.popleft()
-            if len(bucket.timestamps) >= self._max:
-                return False
-            bucket.timestamps.append(now)
-            return True
+            allowed = len(bucket.timestamps) < self._max
+            if allowed:
+                bucket.timestamps.append(now)
+            self._maybe_prune(now)
+            return allowed
+
+    def _maybe_prune(self, now: float) -> None:
+        # Caller must hold `self._lock`. Drop empty buckets so a stream of unique
+        # keys (e.g. unique IPs) can't grow `self._buckets` without bound.
+        if now - self._last_prune < _PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_prune = now
+        cutoff = now - self._window
+        for k, bucket in list(self._buckets.items()):
+            while bucket.timestamps and bucket.timestamps[0] < cutoff:
+                bucket.timestamps.popleft()
+            if not bucket.timestamps:
+                self._buckets.pop(k, None)
 
 
 login_limiter = RateLimiter(max_events=10, window_seconds=300)
@@ -143,7 +177,7 @@ def issue_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _cookie_kwargs(*, http_only: bool, max_age: int | None = None) -> dict[str, object]:
+def _cookie_kwargs(*, http_only: bool, max_age: int | None = None) -> dict[str, Any]:
     return {
         "secure": _SETTINGS.is_production,
         "httponly": http_only,
@@ -157,12 +191,20 @@ def set_session_cookie(response: Response, sid: str) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         sid,
-        **_cookie_kwargs(http_only=True, max_age=_SETTINGS.session_max_age_seconds),  # type: ignore[arg-type]
+        **_cookie_kwargs(http_only=True, max_age=_SETTINGS.session_max_age_seconds),
     )
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    # Pass the same SameSite/Secure attributes used when the cookie was set so
+    # browsers reliably match the deletion against the existing cookie.
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=_SETTINGS.is_production,
+        samesite="strict",
+        httponly=True,
+    )
 
 
 def set_csrf_cookie(response: Response, token: str) -> None:
@@ -170,12 +212,18 @@ def set_csrf_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         CSRF_COOKIE,
         token,
-        **_cookie_kwargs(http_only=False, max_age=_SETTINGS.session_max_age_seconds),  # type: ignore[arg-type]
+        **_cookie_kwargs(http_only=False, max_age=_SETTINGS.session_max_age_seconds),
     )
 
 
 def clear_csrf_cookie(response: Response) -> None:
-    response.delete_cookie(CSRF_COOKIE, path="/")
+    response.delete_cookie(
+        CSRF_COOKIE,
+        path="/",
+        secure=_SETTINGS.is_production,
+        samesite="strict",
+        httponly=False,
+    )
 
 
 def _client_key(request: Request) -> str:
@@ -222,6 +270,27 @@ def require_csrf(request: Request) -> None:
         cookie_token, header_token
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="CSRF check failed")
+
+
+def check_same_origin(request: Request) -> None:
+    """Reject mutating requests whose Origin/Referer don't match the panel.
+
+    This is a relaxed sibling of `require_csrf` for endpoints that must run
+    *before* a CSRF cookie can exist (the first-run setup endpoint). It
+    rejects cross-origin requests but does not require an X-CSRF-Token.
+    """
+    if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return
+    expected_origin = _SETTINGS.allowed_origin.rstrip("/")
+    origin = request.headers.get("origin", "").rstrip("/")
+    referer = request.headers.get("referer", "")
+    if origin and origin != expected_origin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Bad Origin")
+    if not origin and referer and not referer.startswith(expected_origin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Bad Referer")
+    # No Origin and no Referer is allowed (some non-browser clients on first run)
+    # — the intent here is to block obvious cross-origin attacks, not browser
+    # extensions or curl during initial bootstrap.
 
 
 def touch_login_throttle(request: Request) -> None:

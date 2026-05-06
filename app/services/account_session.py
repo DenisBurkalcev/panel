@@ -59,7 +59,7 @@ class AccountSession:
 
     def __init__(self, account_id: int, creds: FunPayCredentials) -> None:
         self.account_id = account_id
-        self._creds = creds
+        self.creds = creds
         self._client = FunPayClient(creds)
         self._opened = False
         self._profile_at: float = 0.0
@@ -85,14 +85,11 @@ class AccountSession:
         await self._ensure_open()
         async with self._lock:
             now = time.monotonic()
-            if not force and (now - self._profile_at) < _PROFILE_TTL:
-                p = await self._client.fetch_profile()
-                return p
-            p = await self._client.fetch_profile(
-                force=force or (now - self._profile_at) > _PROFILE_TTL
-            )
-            self._profile_at = now
-            return p
+            stale = (now - self._profile_at) > _PROFILE_TTL
+            profile = await self._client.fetch_profile(force=force or stale)
+            if force or stale or self._profile_at == 0.0:
+                self._profile_at = now
+            return profile
 
     async def list_chats(self, *, fresh: bool = False) -> list[ChatPreview]:
         await self._ensure_open()
@@ -134,12 +131,13 @@ class AccountSession:
 
     async def send_message(self, chat_id: str, payload: SendMessageRequest) -> ChatThread:
         await self._ensure_open()
+        new_msg = ChatMessage(author=None, is_me=True, text=payload.text)
         async with self._lock:
+            # Only invalidate caches *after* a successful send — a failed send
+            # shouldn't blow away the chat list and force the next poll to
+            # round-trip to FunPay for nothing.
             await self._client.send_message(chat_id, payload.text)
-            # Optimistically append to the cached thread (and invalidate so the
-            # next read fetches the authoritative version from FunPay).
             entry = self._threads.get(chat_id)
-            new_msg = ChatMessage(author=None, is_me=True, text=payload.text)
             if entry is not None:
                 thread = entry.payload
                 thread = ChatThread(
@@ -148,6 +146,9 @@ class AccountSession:
                     messages=[*thread.messages, new_msg],
                     peer_avatar_url=thread.peer_avatar_url,
                 )
+                # Expire the cached thread immediately so the next read forces
+                # a refresh; we still keep the optimistic copy as a fallback if
+                # the network re-fetch below fails.
                 self._threads[chat_id] = _ThreadCacheEntry(
                     expires_at=time.monotonic(), payload=thread
                 )
@@ -169,7 +170,7 @@ class AccountSessionManager:
     async def get(self, account_id: int, creds: FunPayCredentials) -> AccountSession:
         async with self._lock:
             existing = self._sessions.get(account_id)
-            if existing is not None and existing._creds == creds:  # noqa: SLF001
+            if existing is not None and existing.creds == creds:
                 return existing
             if existing is not None:
                 # creds changed — drop and rebuild.
