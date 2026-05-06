@@ -141,12 +141,16 @@ export type ChatPreview = {
   avatar_url: string | null;
 };
 
+export type MessageKind = "regular" | "system" | "support" | "autoreply";
+
 export type ChatMessage = {
   id: string | null;
   author: string | null;
   is_me: boolean;
   text: string;
   sent_at: string | null;
+  kind: MessageKind;
+  label: string | null;
 };
 
 export type ChatThread = {
@@ -154,6 +158,7 @@ export type ChatThread = {
   title: string;
   messages: ChatMessage[];
   peer_avatar_url: string | null;
+  peer_online: boolean | null;
 };
 
 export type AccountCheckResult = {

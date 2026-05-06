@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from app.schemas.chat import ChatMessage, ChatPreview, ChatThread, SendMessageRequest
 from app.services.funpay_client import (
+    ChatHeader,
     FunPayClient,
     FunPayCredentials,
     FunPayError,
@@ -40,6 +41,11 @@ from app.services.funpay_client import (
 _CHAT_LIST_TTL = 3.0
 _THREAD_TTL = 2.0
 _PROFILE_TTL = 60.0
+# The chat header (peer username, avatar, online status) only changes when the
+# buyer logs in/out or updates their profile. Refreshing every 30s gives a
+# usable "online/offline" hint without adding a full HTML page hit to every
+# 3s thread poll — 9 out of 10 polls are served from this cache.
+_HEADER_TTL = 30.0
 
 
 @dataclass
@@ -54,6 +60,12 @@ class _ThreadCacheEntry:
     payload: ChatThread
 
 
+@dataclass
+class _HeaderCacheEntry:
+    expires_at: float
+    payload: ChatHeader
+
+
 class AccountSession:
     """Long-lived FunPay session for a single account, with caching."""
 
@@ -66,6 +78,7 @@ class AccountSession:
         self._lock = asyncio.Lock()
         self._chats: _ChatsCacheEntry | None = None
         self._threads: dict[str, _ThreadCacheEntry] = {}
+        self._headers: dict[str, _HeaderCacheEntry] = {}
 
     async def _ensure_open(self) -> None:
         if self._opened:
@@ -109,25 +122,77 @@ class AccountSession:
             if not fresh and entry and entry.expires_at > now:
                 return entry.payload
             thread = await self._client.get_chat(chat_id)
-            thread = self._enrich_thread(thread)
+            header = await self._fetch_header_locked(chat_id, now=now, fresh=fresh)
+            thread = self._enrich_thread(thread, header)
             self._threads[chat_id] = _ThreadCacheEntry(
                 expires_at=now + _THREAD_TTL, payload=thread
             )
             return thread
 
-    def _enrich_thread(self, thread: ChatThread) -> ChatThread:
-        """Attach the peer avatar from the chat-list cache (best-effort)."""
-        if thread.peer_avatar_url is not None or self._chats is None:
+    async def _fetch_header_locked(
+        self, chat_id: str, *, now: float, fresh: bool
+    ) -> ChatHeader | None:
+        """Refresh the cached chat header, swallowing transient failures.
+
+        Header data is best-effort decoration — if the HTML page is briefly
+        unavailable we keep the previous value so the title doesn't flicker
+        back to the chat id and the buyer's avatar doesn't disappear.
+        """
+        cached = self._headers.get(chat_id)
+        if not fresh and cached and cached.expires_at > now:
+            return cached.payload
+        try:
+            header = await self._client.fetch_chat_header(chat_id)
+        except FunPayError as exc:
+            logging.getLogger("funpay.account_session").debug(
+                "chat header fetch failed for %s: %s", chat_id, exc
+            )
+            return cached.payload if cached else None
+        self._headers[chat_id] = _HeaderCacheEntry(
+            expires_at=now + _HEADER_TTL, payload=header
+        )
+        return header
+
+    def _enrich_thread(
+        self, thread: ChatThread, header: ChatHeader | None
+    ) -> ChatThread:
+        """Layer chat-header + chat-list data onto a fresh thread payload.
+
+        Priority for the displayed title:
+          1. Real interlocutor name parsed from message bodies (already on `thread.title`).
+          2. Buyer name from `/chat/?node=<id>` header (covers chats with only
+             system / autoreply messages, where the message-derived title would
+             fall back to a `users-A-B` token).
+          3. The original `thread.title` value (chat id placeholder).
+        """
+        title = thread.title
+        peer_avatar = thread.peer_avatar_url
+        peer_online = thread.peer_online
+        if header is not None:
+            if header.username and (not title or title.startswith("chat ")):
+                title = header.username
+            if header.avatar_url and not peer_avatar:
+                peer_avatar = header.avatar_url
+            if header.online is not None:
+                peer_online = header.online
+        if not peer_avatar and self._chats is not None:
+            for preview in self._chats.payload:
+                if preview.id == thread.id and preview.avatar_url:
+                    peer_avatar = preview.avatar_url
+                    break
+        if (
+            title == thread.title
+            and peer_avatar == thread.peer_avatar_url
+            and peer_online == thread.peer_online
+        ):
             return thread
-        for preview in self._chats.payload:
-            if preview.id == thread.id and preview.avatar_url:
-                return ChatThread(
-                    id=thread.id,
-                    title=thread.title,
-                    messages=thread.messages,
-                    peer_avatar_url=preview.avatar_url,
-                )
-        return thread
+        return ChatThread(
+            id=thread.id,
+            title=title,
+            messages=thread.messages,
+            peer_avatar_url=peer_avatar,
+            peer_online=peer_online,
+        )
 
     async def send_message(self, chat_id: str, payload: SendMessageRequest) -> ChatThread:
         await self._ensure_open()
@@ -145,6 +210,7 @@ class AccountSession:
                     title=thread.title,
                     messages=[*thread.messages, new_msg],
                     peer_avatar_url=thread.peer_avatar_url,
+                    peer_online=thread.peer_online,
                 )
                 # Expire the cached thread immediately so the next read forces
                 # a refresh; we still keep the optimistic copy as a fallback if

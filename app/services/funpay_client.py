@@ -25,7 +25,7 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from app.config import get_settings
-from app.schemas.chat import ChatMessage, ChatPreview, ChatThread
+from app.schemas.chat import ChatMessage, ChatPreview, ChatThread, MessageKind
 
 log = logging.getLogger("funpay.client")
 _settings = get_settings()
@@ -55,6 +55,23 @@ class FunPayProfile:
     user_id: int
     username: str
     csrf_token: str
+
+
+@dataclass(frozen=True)
+class ChatHeader:
+    """Buyer-side info scraped from the `/chat/?node=<id>` HTML header.
+
+    The `/chat/history` JSON endpoint we use for the message thread is fast
+    but only knows author *ids* — it carries no human-friendly buyer name,
+    avatar URL, or online state. The chat HTML page does, in `.chat-header`.
+    We scrape it once per chat-open and cache for ~30s so online status
+    stays fresh without us hammering FunPay every poll tick.
+    """
+
+    user_id: int | None
+    username: str | None
+    avatar_url: str | None
+    online: bool | None
 
 
 def _build_httpx_client(creds: FunPayCredentials) -> httpx.AsyncClient:
@@ -100,6 +117,16 @@ _BG_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", re.IGNORECASE)
 # as "no avatar" so the frontend renders the initials fallback instead.
 _DEFAULT_AVATAR_PATH = "/img/layout/avatar.png"
 
+# FunPay tags each message with a small label inside `.chat-msg-author-label`
+# (`label-primary` = system notification, `label-default` = saved autoresponse,
+# `label-success` = FunPay support staff). Anything unknown falls back to
+# `regular` so a future label class doesn't blank the message body.
+_LABEL_KIND_BY_CLASS: dict[str, MessageKind] = {
+    "label-primary": "system",
+    "label-default": "autoreply",
+    "label-success": "support",
+}
+
 
 def _resolve_avatar(style: str | None) -> str | None:
     """Extract a fully-qualified avatar URL from a `style` attribute, or None.
@@ -114,6 +141,21 @@ def _resolve_avatar(style: str | None) -> str | None:
     if not match:
         return None
     raw = match.group(1).strip()
+    if not raw or raw.endswith(_DEFAULT_AVATAR_PATH):
+        return None
+    return urljoin(_settings.funpay_base_url, raw)
+
+
+def _resolve_image_src(src: str | None) -> str | None:
+    """Same as `_resolve_avatar` but for an `<img src>` instead of CSS background.
+
+    The `/chat/?node=<id>` page renders the buyer's photo as `<img src="...">`
+    inside `.chat-header .media-left`, while the chat-list bookmarks render it
+    via `style="background-image: url(...)"` — same value, two encodings.
+    """
+    if not src:
+        return None
+    raw = src.strip()
     if not raw or raw.endswith(_DEFAULT_AVATAR_PATH):
         return None
     return urljoin(_settings.funpay_base_url, raw)
@@ -282,7 +324,12 @@ class FunPayClient:
                 continue
             title_node = node.select_one(".media-user-name")
             preview_node = node.select_one(".contact-item-message")
-            avatar_node = node.select_one(".avatar-photo, .contact-item-photo")
+            # The visible photo is the *inner* `.avatar-photo` div whose `style`
+            # holds the background-image URL. The outer `.contact-item-photo`
+            # has no style and was previously matched first by the comma
+            # selector — which always returned `None` for the URL and forced
+            # the frontend to render initials for every chat.
+            avatar_node = node.select_one(".contact-item-photo .avatar-photo")
             classes = node.get("class") or []
             title = (title_node.get_text(strip=True) if title_node else "") or f"chat {chat_id}"
             preview = preview_node.get_text(strip=True) if preview_node else None
@@ -300,6 +347,65 @@ class FunPayClient:
                 )
             )
         return previews
+
+    # ------------------------------------------------------------------
+    # Chat header (HTML page) — buyer name / avatar / online status
+    # ------------------------------------------------------------------
+
+    async def fetch_chat_header(self, chat_id: str) -> ChatHeader:
+        if not _CHAT_ID_RE.match(chat_id):
+            raise FunPayError("Invalid chat id")
+        coerced = _coerce_chat_id(chat_id)
+        url = urljoin(_settings.funpay_base_url, "/chat/")
+        try:
+            resp = await self.http.get(url, params={"node": coerced})
+        except httpx.HTTPError as exc:
+            raise FunPayError(f"Network error: {exc}") from exc
+        if resp.status_code in (401, 403):
+            raise FunPayAuthError(f"FunPay refused /chat/ ({resp.status_code})")
+        if resp.status_code != 200:
+            raise FunPayError(f"FunPay returned HTTP {resp.status_code} for /chat/")
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        header = soup.select_one(".chat-header")
+        if not isinstance(header, Tag):
+            return ChatHeader(user_id=None, username=None, avatar_url=None, online=None)
+
+        media_user = header.select_one(".media-user")
+        online: bool | None = None
+        if isinstance(media_user, Tag):
+            mu_classes = media_user.get("class") or []
+            if "online" in mu_classes:
+                online = True
+            elif "offline" in mu_classes:
+                online = False
+
+        username: str | None = None
+        user_id_int: int | None = None
+        name_link = header.select_one(".media-user-name a")
+        if isinstance(name_link, Tag):
+            username = (name_link.get_text(strip=True) or None) if name_link else None
+            href = name_link.get("href")
+            if isinstance(href, str):
+                m = _USER_LINK_RE.search(href)
+                if m:
+                    try:
+                        user_id_int = int(m.group(1))
+                    except ValueError:
+                        user_id_int = None
+
+        avatar_url: str | None = None
+        avatar_img = header.select_one(".media-left img")
+        if isinstance(avatar_img, Tag):
+            src = avatar_img.get("src")
+            avatar_url = _resolve_image_src(src if isinstance(src, str) else None)
+
+        return ChatHeader(
+            user_id=user_id_int,
+            username=username,
+            avatar_url=avatar_url,
+            online=online,
+        )
 
     # ------------------------------------------------------------------
     # Chat history (JSON endpoint — far faster than the HTML chat page)
@@ -333,8 +439,14 @@ class FunPayClient:
 
         chat = body.get("chat") or {}
         node_info = chat.get("node") or {}
-        title = node_info.get("name") or f"chat {chat_id}"
-        # Try to derive a human title from the messages' author block.
+        # FunPay's `node.name` is an internal `users-A-B` token — useless as a
+        # human title. Default to a generic `chat <id>` placeholder; the real
+        # buyer name is recovered from message author blocks (below) or from
+        # the `/chat/?node=` header (`fetch_chat_header`, called by the
+        # session layer). Falling through to `users-A-B` is what previously
+        # caused chats with only system / autoreply messages to render as
+        # `users-12998200-...` or `FunPay`.
+        title = f"chat {chat_id}"
         messages_json = chat.get("messages") or []
 
         msgs: list[ChatMessage] = []
@@ -350,7 +462,34 @@ class FunPayClient:
             # naive `.get_text()` would print it twice).
             author_node = soup.select_one(".media-user-name a, .chat-msg-author")
             author = (author_node.get_text(strip=True) if author_node else None) or None
-            if author and not interlocutor_name and author_id != profile.user_id:
+
+            # Classify by the small `.chat-msg-author-label` pill: system
+            # notifications, support staff, or seller-side autoresponses are
+            # rendered with their own visual treatment in the panel.
+            label_node = soup.select_one(".chat-msg-author-label")
+            kind: MessageKind = "regular"
+            label_text: str | None = None
+            if isinstance(label_node, Tag):
+                label_text = label_node.get_text(strip=True) or None
+                for cls in label_node.get("class") or []:
+                    if cls in _LABEL_KIND_BY_CLASS:
+                        kind = _LABEL_KIND_BY_CLASS[cls]
+                        break
+            # author=0 is FunPay's reserved id for platform-generated messages.
+            # If we somehow miss the label class but see this id we still want
+            # the system styling.
+            if kind == "regular" and author_id == 0:
+                kind = "system"
+
+            # Only treat regular human messages from the *other* party as
+            # title candidates — system / support broadcasts also link to
+            # users named "FunPay" and would poison the title otherwise.
+            if (
+                author
+                and not interlocutor_name
+                and author_id != profile.user_id
+                and kind == "regular"
+            ):
                 interlocutor_name = author
 
             # Strip non-message scaffolding (avatar, header link with the
@@ -389,10 +528,18 @@ class FunPayClient:
                     is_me=(author_id == profile.user_id),
                     text=text,
                     sent_at=sent_at,
+                    kind=kind,
+                    label=label_text,
                 )
             )
+        # Fall back to FunPay's internal node name only when nothing better
+        # is available; the session layer will further override with the
+        # `/chat/?node=` header so the title matches the chat list.
+        node_name = node_info.get("name")
         if interlocutor_name:
             title = interlocutor_name
+        elif isinstance(node_name, str) and node_name and not node_name.startswith("users-"):
+            title = node_name
         return ChatThread(id=chat_id, title=title, messages=msgs)
 
     # ------------------------------------------------------------------

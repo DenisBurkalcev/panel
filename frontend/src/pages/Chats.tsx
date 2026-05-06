@@ -4,6 +4,7 @@ import {
   ApiError,
   api,
   type Account,
+  type ChatMessage,
   type ChatPreview,
   type ChatThread,
 } from "../api";
@@ -84,7 +85,9 @@ export default function ChatsPage() {
               key={a.id}
               onClick={() => selectAccount(a.id)}
               className={
-                selectedAccountId === a.id ? "chip text-ink" : "btn-ghost"
+                selectedAccountId === a.id
+                  ? "chip normal-case tracking-normal text-ink"
+                  : "btn-ghost"
               }
             >
               {a.label}
@@ -95,7 +98,6 @@ export default function ChatsPage() {
       {selectedAccountId !== null && (
         <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr] gap-5">
           <ChatList
-            key={selectedAccountId}
             accountId={selectedAccountId}
             activeChatId={chatId}
             onSelect={selectChat}
@@ -161,14 +163,7 @@ function ChatList({
         <div className="text-sm font-semibold uppercase tracking-wider text-ink2">
           Chats
         </div>
-        <button
-          className="btn-ghost text-xs"
-          disabled={busy}
-          onClick={() => void load(true)}
-          title="Refresh from FunPay"
-        >
-          {busy ? "…" : "Refresh"}
-        </button>
+        {busy && <div className="text-xs text-muted">syncing…</div>}
       </div>
       {err && <div className="text-sm text-danger">{err}</div>}
       <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1">
@@ -345,19 +340,32 @@ function ChatPane({
         <div className="flex min-w-0 items-center gap-3">
           <Avatar name={peerName} src={peerAvatar} size="md" />
           <div className="min-w-0">
-            <div className="truncate text-base font-semibold">
-              {thread?.title || chatId}
+            <div className="flex items-center gap-2">
+              <div className="truncate text-base font-semibold">
+                {thread?.title || chatId}
+              </div>
+              {thread?.peer_online === true && (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400"
+                  title="Online on FunPay"
+                >
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  online
+                </span>
+              )}
+              {thread?.peer_online === false && (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] text-muted"
+                  title="Offline on FunPay"
+                >
+                  <span className="h-2 w-2 rounded-full bg-muted/60" />
+                  offline
+                </span>
+              )}
             </div>
             <div className="text-xs text-muted">Chat #{chatId}</div>
           </div>
         </div>
-        <button
-          className="btn-ghost text-xs"
-          onClick={() => void load(true)}
-          title="Refresh from FunPay"
-        >
-          Refresh
-        </button>
       </div>
       <div
         ref={messagesRef}
@@ -369,30 +377,14 @@ function ChatPane({
         ) : thread.messages.length === 0 ? (
           <div className="text-sm text-muted">No messages yet.</div>
         ) : (
-          thread.messages.map((m, i) => {
-            const showPeerAvatar = !m.is_me;
-            const authorName = m.author ?? peerName;
-            return (
-              <div
-                key={`${m.id ?? i}`}
-                className={`flex items-end gap-2 ${
-                  m.is_me ? "justify-end" : "justify-start"
-                }`}
-              >
-                {showPeerAvatar && (
-                  <Avatar name={authorName} src={peerAvatar} size="sm" />
-                )}
-                <div className={m.is_me ? "bubble-me" : "bubble-them"}>
-                  {!m.is_me && m.author && (
-                    <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted">
-                      {m.author}
-                    </div>
-                  )}
-                  <div>{m.text}</div>
-                </div>
-              </div>
-            );
-          })
+          thread.messages.map((m, i) => (
+            <MessageRow
+              key={`${m.id ?? i}`}
+              message={m}
+              peerAvatar={peerAvatar}
+              peerName={peerName}
+            />
+          ))
         )}
       </div>
       {err && <div className="mt-2 text-sm text-danger">{err}</div>}
@@ -400,7 +392,7 @@ function ChatPane({
         <textarea
           ref={inputRef}
           className="input min-h-[2.5rem] max-h-36 resize-none leading-relaxed"
-          placeholder="Type a message…  (Shift+Enter — new line)"
+          placeholder="Type a message…"
           value={text}
           rows={1}
           onChange={(e) => setText(e.target.value)}
@@ -411,6 +403,94 @@ function ChatPane({
           {sending ? "Sending…" : "Send"}
         </button>
       </form>
+    </div>
+  );
+}
+
+// Visual styling for the small role tag rendered above non-regular messages.
+// Translated to Russian so the panel matches FunPay's labels (опов., автоответ,
+// поддержка) without requiring an i18n layer for a single feature.
+const KIND_BADGE: Record<
+  Exclude<ChatMessage["kind"], "regular">,
+  { label: string; chip: string; tone: string }
+> = {
+  system: {
+    label: "Сообщение от системы",
+    chip:
+      "border border-amber-300/60 bg-amber-50 text-amber-800 " +
+      "dark:border-amber-400/40 dark:bg-amber-400/10 dark:text-amber-200",
+    tone: "text-amber-700 dark:text-amber-300",
+  },
+  support: {
+    label: "Сообщение от поддержки FunPay",
+    chip:
+      "border border-emerald-300/60 bg-emerald-50 text-emerald-800 " +
+      "dark:border-emerald-400/40 dark:bg-emerald-400/10 dark:text-emerald-200",
+    tone: "text-emerald-700 dark:text-emerald-300",
+  },
+  autoreply: {
+    label: "Автоответ",
+    chip:
+      "border border-sky-300/50 bg-sky-50 text-sky-800 " +
+      "dark:border-sky-400/30 dark:bg-sky-400/10 dark:text-sky-200",
+    tone: "text-sky-700 dark:text-sky-300",
+  },
+};
+
+function MessageRow({
+  message,
+  peerAvatar,
+  peerName,
+}: {
+  message: ChatMessage;
+  peerAvatar: string | null;
+  peerName: string;
+}) {
+  if (message.kind === "system" || message.kind === "support") {
+    const meta = KIND_BADGE[message.kind];
+    return (
+      <div className="flex justify-center px-4">
+        <div
+          className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm whitespace-pre-wrap break-words ${meta.chip}`}
+        >
+          <div
+            className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${meta.tone}`}
+          >
+            {meta.label}
+            {message.label ? ` • ${message.label}` : ""}
+          </div>
+          {message.text}
+        </div>
+      </div>
+    );
+  }
+
+  const showPeerAvatar = !message.is_me;
+  const authorName = message.author ?? peerName;
+  const isAutoreply = message.kind === "autoreply";
+  const meta = isAutoreply ? KIND_BADGE.autoreply : null;
+  return (
+    <div
+      className={`flex items-end gap-2 ${
+        message.is_me ? "justify-end" : "justify-start"
+      }`}
+    >
+      {showPeerAvatar && <Avatar name={authorName} src={peerAvatar} size="sm" />}
+      <div className={message.is_me ? "bubble-me" : "bubble-them"}>
+        {!message.is_me && message.author && (
+          <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted">
+            {message.author}
+          </div>
+        )}
+        {meta && (
+          <div
+            className={`mb-1 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${meta.chip}`}
+          >
+            {meta.label}
+          </div>
+        )}
+        <div>{message.text}</div>
+      </div>
     </div>
   );
 }
