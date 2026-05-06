@@ -17,6 +17,43 @@ function readCsrf(): string {
   return match ? decodeURIComponent(match.split("=")[1]) : "";
 }
 
+// FastAPI returns plain `{detail: "..."}` for HTTPException, but for Pydantic
+// 422 validation errors the body is `{detail: [{loc, msg, type, ...}, ...]}`.
+// `String(detail)` on the array shape collapses to "[object Object]" which is
+// useless to the user — render each error as "loc: msg" instead.
+function formatDetail(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const obj = item as { loc?: unknown; msg?: unknown };
+          const msg = typeof obj.msg === "string" ? obj.msg : null;
+          if (Array.isArray(obj.loc) && obj.loc.length > 0 && msg) {
+            // Drop the leading "body"/"query"/etc. segment so the user sees
+            // the field name they actually typed into.
+            const tail = obj.loc.slice(obj.loc[0] === "body" ? 1 : 0);
+            const where = tail.length > 0 ? tail.join(".") : "input";
+            return `${where}: ${msg}`;
+          }
+          return msg ?? JSON.stringify(item);
+        }
+        return String(item);
+      })
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join("; ") : null;
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  }
+  return String(value);
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -51,7 +88,7 @@ async function request<T>(
   if (!resp.ok) {
     const detail =
       (parsed && typeof parsed === "object" && "detail" in parsed
-        ? String((parsed as { detail: unknown }).detail)
+        ? formatDetail((parsed as { detail: unknown }).detail)
         : null) || text || resp.statusText;
     throw new ApiError(resp.status, detail);
   }
