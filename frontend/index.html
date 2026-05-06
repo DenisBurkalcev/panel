@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>FunPay Killer</title>
+    <!--
+      Loaded synchronously and from /theme-init.js (NOT inline) so the
+      panel's strict CSP (`script-src 'self'`, no inline scripts) keeps
+      working. Apply theme before paint to avoid a flash of dark UI for
+      users who picked light.
+    -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
