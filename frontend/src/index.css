@@ -199,10 +199,19 @@ body {
    * avatar (`bottom-right` for me, `bottom-left` for them) is squared off
    * to create a subtle speech-tail when the bubble is the last in a group;
    * the `.bubble-tail-*` modifiers below apply the squared corner.
+   *
+   * Width is intentionally NOT capped here — the wrapping flex container
+   * in `MessageRow` enforces `max-w-[80%]` against the chat pane, which
+   * is a definite width. Putting another `max-width: <%>` on the bubble
+   * makes the bubble's containing block (the auto-sized
+   * `bubble-col`) iteratively shrink until short Cyrillic words like
+   * "здравствуйте" get hyphenated mid-word. Letting the bubble take its
+   * natural width (clipped by the parent flex) wraps text only at word
+   * boundaries when it actually overflows the 80% pane budget.
    */
   .bubble {
-    @apply max-w-[80%] rounded-lg px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm
-           whitespace-pre-wrap break-words;
+    @apply rounded-lg px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm
+           whitespace-pre-wrap [overflow-wrap:anywhere];
   }
   .bubble-me {
     @apply bubble bg-surface2 text-ink;
