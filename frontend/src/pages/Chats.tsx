@@ -134,12 +134,9 @@ export default function ChatsPage() {
             title={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
             aria-label={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
             aria-pressed={sidebarOpen}
-            data-open={sidebarOpen ? "true" : "false"}
           >
             {/* IDE-style sidebar-toggle glyph: a rectangle with a vertical
-                divider on the right. The filled-cell highlight scales in/out
-                so the icon matches the sidebar's open/closed state with a
-                short animation. */}
+                divider on the right and a static filled-cell highlight. */}
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 24 24"
