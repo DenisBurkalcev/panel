@@ -51,6 +51,11 @@ export default function Layout({ me, onLogout }: Props) {
           ))}
         </nav>
         <div className="mt-auto flex flex-col items-center gap-1.5">
+          {/* Theme toggle lives at the bottom of the left rail, directly
+              above the logout button. Putting it here frees the top of the
+              main pane (which used to host this button) and keeps all the
+              session-level chrome — logout + theme — in one column. */}
+          <ThemeToggle />
           <button
             onClick={onLogout}
             className="grid h-9 w-9 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
@@ -61,16 +66,8 @@ export default function Layout({ me, onLogout }: Props) {
           </button>
         </div>
       </aside>
-      <main className="flex min-h-0 min-w-0 flex-col gap-3">
-        {/* Top toolbar row reserves vertical space at the top of the main
-            pane so the theme toggle never overlaps page-level controls
-            (e.g. "+ Add account", "+ Install plugin", thread "Refresh"). */}
-        <div className="flex items-center justify-end">
-          <ThemeToggle />
-        </div>
-        <div className="min-h-0 min-w-0 flex-1">
-          <Outlet />
-        </div>
+      <main className="flex min-h-0 min-w-0 flex-col">
+        <Outlet />
       </main>
     </div>
   );

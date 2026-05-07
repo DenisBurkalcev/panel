@@ -9,6 +9,11 @@ type Props = {
   orderId: string | null;
   /** User clicked the X — close the order pane and revert to product info. */
   onCloseOrder: () => void;
+  /** Skip recurring polls when the sidebar is currently animating closed
+   *  or otherwise off-screen. The card stays mounted so the close
+   *  transition has something to fade out, but we don't burn FunPay
+   *  bandwidth on an invisible pane. */
+  paused?: boolean;
 };
 
 /**
@@ -26,6 +31,7 @@ export default function RightSidebar({
   chatId,
   orderId,
   onCloseOrder,
+  paused = false,
 }: Props) {
   if (orderId !== null) {
     return (
@@ -36,23 +42,33 @@ export default function RightSidebar({
       />
     );
   }
-  return <ProductPane accountId={accountId} chatId={chatId} />;
+  return <ProductPane accountId={accountId} chatId={chatId} paused={paused} />;
 }
 
 function ProductPane({
   accountId,
   chatId,
+  paused,
 }: {
   accountId: number;
   chatId: string | null;
+  paused: boolean;
 }) {
   const [info, setInfo] = useState<ProductInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  // Reset cached info whenever the underlying chat changes so we don't
+  // briefly show the previous buyer's product while the new fetch is in
+  // flight. `paused` is intentionally left out of this effect's deps —
+  // toggling the sidebar shouldn't blank out the cached card.
   useEffect(() => {
     setInfo(null);
     setErr(null);
+  }, [accountId, chatId]);
+
+  useEffect(() => {
     if (chatId === null) return;
+    if (paused) return;
     let cancelled = false;
     async function load() {
       try {
@@ -81,7 +97,7 @@ function ProductPane({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [accountId, chatId]);
+  }, [accountId, chatId, paused]);
 
   return (
     <div className="card flex min-h-0 flex-col gap-3">

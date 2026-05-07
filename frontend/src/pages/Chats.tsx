@@ -101,12 +101,12 @@ export default function ChatsPage() {
     );
   }
 
-  // Three-column grid when the right sidebar is open, two columns otherwise.
-  // Both columns shrink/grow flexibly so the chat pane keeps its width as the
-  // sidebar collapses.
-  const gridCols = sidebarOpen
-    ? "grid-cols-[280px_minmax(0,1fr)_300px]"
-    : "grid-cols-[280px_minmax(0,1fr)]";
+  // The right sidebar is meaningful only when an actual chat thread is
+  // open — otherwise the chat pane just shows "Pick a chat on the left."
+  // and there's nothing to surface in the sidebar. Hide both the toggle
+  // button and the column itself in that state.
+  const showSidebar = chatId !== null && sidebarOpen;
+  const showSidebarToggle = chatId !== null;
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
@@ -127,36 +127,51 @@ export default function ChatsPage() {
             </button>
           ))}
         </div>
-        <button
-          onClick={() => setSidebarOpen((v) => !v)}
-          className="ml-auto grid h-9 w-9 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
-          title={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
-          aria-label={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
-          aria-pressed={sidebarOpen}
-        >
-          {/* IDE-style sidebar-toggle glyph: a rectangle with a vertical
-              divider on the right. Filled when the panel is open. */}
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            width="18"
-            height="18"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+        {showSidebarToggle && (
+          <button
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="sidebar-toggle ml-auto grid h-9 w-9 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
+            title={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
+            aria-label={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
+            aria-pressed={sidebarOpen}
+            data-open={sidebarOpen ? "true" : "false"}
           >
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <line x1="15" y1="4" x2="15" y2="20" />
-            {sidebarOpen && (
-              <rect x="15" y="4" width="6" height="16" rx="0" fill="currentColor" opacity="0.18" />
-            )}
-          </svg>
-        </button>
+            {/* IDE-style sidebar-toggle glyph: a rectangle with a vertical
+                divider on the right. The filled-cell highlight scales in/out
+                so the icon matches the sidebar's open/closed state with a
+                short animation. */}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              width="18"
+              height="18"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="sidebar-toggle-icon"
+            >
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <line x1="15" y1="4" x2="15" y2="20" />
+              <rect
+                className="sidebar-toggle-fill"
+                x="15"
+                y="4"
+                width="6"
+                height="16"
+                rx="0"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
+        )}
       </header>
       {selectedAccountId !== null && (
-        <div className={`grid min-h-0 flex-1 gap-4 ${gridCols}`}>
+        <div
+          className="chat-grid min-h-0 flex-1 gap-4"
+          data-sidebar={showSidebar ? "open" : "closed"}
+        >
           <ChatList
             accountId={selectedAccountId}
             activeChatId={chatId}
@@ -170,14 +185,27 @@ export default function ChatsPage() {
             // don't carry stale message state into a different chat.
             key={`${selectedAccountId}-${chatId ?? ""}`}
           />
-          {sidebarOpen && (
-            <RightSidebar
-              accountId={selectedAccountId}
-              chatId={chatId}
-              orderId={orderId}
-              onCloseOrder={() => setOrderId(null)}
-            />
-          )}
+          {/*
+            The sidebar column is always present in the grid (when a chat
+            is open) so its width can transition smoothly via
+            `grid-template-columns`. The card itself stays mounted while
+            the close animation runs and only stops polling FunPay via the
+            `paused` flag.
+          */}
+          <div
+            className="chat-grid__sidebar min-h-0"
+            aria-hidden={!showSidebar}
+          >
+            {chatId !== null && (
+              <RightSidebar
+                accountId={selectedAccountId}
+                chatId={chatId}
+                orderId={orderId}
+                onCloseOrder={() => setOrderId(null)}
+                paused={!sidebarOpen}
+              />
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -701,7 +729,7 @@ function MessageRow({
   return (
     <div className={`flex w-full ${mine ? "justify-end" : "justify-start"} ${extraSpacing}`}>
       <div
-        className={`flex w-full max-w-[80%] items-end gap-2 ${
+        className={`flex max-w-[80%] items-end gap-2 ${
           mine ? "flex-row-reverse" : ""
         }`}
       >

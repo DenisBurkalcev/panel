@@ -256,3 +256,59 @@ body {
     @apply chat-row text-ink shadow-neu-pressed bg-surface;
   }
 }
+
+/*
+ * Chats page grid. Three explicit columns (chat list / pane / sidebar) so
+ * the right sidebar can animate its width via `grid-template-columns`. The
+ * 0px fallback below makes this work in browsers that don't yet allow
+ * mixing `<length>` and `auto` keyframes.
+ */
+.chat-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) 300px;
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-grid[data-sidebar="closed"] {
+  grid-template-columns: 280px minmax(0, 1fr) 0px;
+}
+.chat-grid__sidebar {
+  overflow: hidden;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    opacity 200ms ease 80ms,
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-grid[data-sidebar="closed"] .chat-grid__sidebar {
+  opacity: 0;
+  transform: translateX(20px);
+  /* No delay on close so the fade and slide complete together. */
+  transition:
+    opacity 180ms ease,
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+/*
+ * Sidebar toggle: the filled inset rect scales/fades to mirror the panel
+ * state, and the whole icon picks up a subtle rotation on close so the
+ * button itself reads as animated, not just static.
+ */
+.sidebar-toggle .sidebar-toggle-icon {
+  transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-toggle[data-open="false"] .sidebar-toggle-icon {
+  transform: rotate(180deg);
+}
+.sidebar-toggle .sidebar-toggle-fill {
+  opacity: 0.18;
+  transform-origin: 18px 12px;
+  transform: scaleX(1);
+  transition:
+    transform 220ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 220ms ease;
+}
+.sidebar-toggle[data-open="false"] .sidebar-toggle-fill {
+  opacity: 0;
+  transform: scaleX(0);
+}
