@@ -21,16 +21,19 @@ const NAV: Array<{
 
 export default function Layout({ me, onLogout }: Props) {
   return (
-    <div className="grid h-full min-h-screen grid-cols-[112px_1fr] gap-4 p-4">
-      <aside className="neu flex flex-col items-stretch gap-3 p-3">
+    // The primary nav is now icon-only, halved in width (≈56px), so the chat
+    // page has noticeably more horizontal room for messages and the new
+    // right-hand product/order sidebar.
+    <div className="grid h-full min-h-screen grid-cols-[56px_1fr] gap-3 p-3">
+      <aside className="neu flex flex-col items-stretch gap-2 p-2">
         <Link
           to="/"
-          className="grid h-10 w-10 mx-auto place-items-center rounded-xl bg-surface text-ink shadow-neu-sm font-black"
+          className="grid h-9 w-9 mx-auto place-items-center rounded-xl bg-surface text-ink shadow-neu-sm font-black text-sm"
           title={`FunPay Killer · ${me.username}`}
         >
           F
         </Link>
-        <nav className="flex flex-col gap-1.5">
+        <nav className="flex flex-col gap-1">
           {NAV.map((item) => (
             <NavLink
               key={item.to}
@@ -39,28 +42,19 @@ export default function Layout({ me, onLogout }: Props) {
               title={item.label}
               className={({ isActive }) =>
                 isActive
-                  ? "flex flex-col items-center gap-0.5 rounded-xl px-1 py-2 text-[10px] uppercase tracking-wider text-ink shadow-neu-pressed bg-surface"
-                  : "flex flex-col items-center gap-0.5 rounded-xl px-1 py-2 text-[10px] uppercase tracking-wider text-ink2 transition-shadow hover:text-ink"
+                  ? "flex items-center justify-center rounded-xl py-2 text-base text-ink shadow-neu-pressed bg-surface"
+                  : "flex items-center justify-center rounded-xl py-2 text-base text-ink2 transition-shadow hover:text-ink"
               }
             >
-              <span aria-hidden className="text-lg leading-none">
-                {item.icon}
-              </span>
-              {item.label}
+              <span aria-hidden>{item.icon}</span>
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto flex flex-col items-center gap-2">
-          <div
-            className="truncate text-center text-[10px] text-muted"
-            title={me.username}
-          >
-            {me.username}
-          </div>
+        <div className="mt-auto flex flex-col items-center gap-1.5">
           <button
             onClick={onLogout}
-            className="btn-icon"
-            title="Log out"
+            className="grid h-9 w-9 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
+            title={`Log out · ${me.username}`}
             aria-label="Log out"
           >
             ⏻

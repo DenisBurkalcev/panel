@@ -143,6 +143,15 @@ export type ChatPreview = {
 
 export type MessageKind = "regular" | "system" | "support" | "autoreply";
 
+export type Attachment = {
+  kind: "image";
+  src: string;
+  href: string;
+  name: string | null;
+  width: number | null;
+  height: number | null;
+};
+
 export type ChatMessage = {
   id: string | null;
   author: string | null;
@@ -151,6 +160,9 @@ export type ChatMessage = {
   sent_at: string | null;
   kind: MessageKind;
   label: string | null;
+  attachments: Attachment[];
+  is_group_first: boolean;
+  is_group_last: boolean;
 };
 
 export type ChatThread = {
@@ -159,6 +171,31 @@ export type ChatThread = {
   messages: ChatMessage[];
   peer_avatar_url: string | null;
   peer_online: boolean | null;
+};
+
+export type ProductInfo = {
+  available: boolean;
+  title: string | null;
+  description: string | null;
+  price: string | null;
+  url: string | null;
+};
+
+export type OrderItem = { label: string; value: string };
+
+export type OrderInfo = {
+  id: string;
+  title: string | null;
+  status: string | null;
+  buyer: string | null;
+  items: OrderItem[];
+  total: string | null;
+  url: string;
+};
+
+export type UploadAttachmentResult = {
+  image_id: string;
+  url: string | null;
 };
 
 export type AccountCheckResult = {
@@ -179,4 +216,4 @@ export type PluginInfo = {
   files: string[];
 };
 
-export type SendMessageRequest = { text: string };
+export type SendMessageRequest = { text: string; image_id?: string | null };

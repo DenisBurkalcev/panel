@@ -32,6 +32,22 @@
   --scrollbar-track: #0a0a0a;
   --scrollbar-thumb: #1f1f1f;
   --scrollbar-thumb-hover: #2a2a2a;
+
+  /*
+   * Per-message-kind tokens. Triplets so utility classes can reuse them as
+   * `bg-[rgb(var(--c-system-bg)/0.18)]`. Dark-mode defaults: muted, low-
+   * saturation tints that stay readable against the dark surface; the
+   * `.light` block below swaps to higher-contrast versions for light mode.
+   */
+  --c-system-bg: 251 191 36;        /* amber-400 */
+  --c-system-fg: 252 211 77;        /* amber-300 */
+  --c-system-rim: 217 119 6;        /* amber-600 */
+  --c-support-bg: 52 211 153;       /* emerald-400 */
+  --c-support-fg: 110 231 183;      /* emerald-300 */
+  --c-support-rim: 5 150 105;       /* emerald-600 */
+  --c-autoreply-bg: 56 189 248;     /* sky-400 */
+  --c-autoreply-fg: 125 211 252;    /* sky-300 */
+  --c-autoreply-rim: 2 132 199;     /* sky-600 */
 }
 
 html.light {
@@ -57,6 +73,17 @@ html.light {
   --scrollbar-track: #e8e8eb;
   --scrollbar-thumb: #c5c5cb;
   --scrollbar-thumb-hover: #a8a8b0;
+
+  /* Brighter, higher-contrast text on a soft tint for light mode. */
+  --c-system-bg: 254 243 199;       /* amber-100 */
+  --c-system-fg: 120 53 15;         /* amber-900 */
+  --c-system-rim: 251 191 36;       /* amber-400 */
+  --c-support-bg: 209 250 229;      /* emerald-100 */
+  --c-support-fg: 6 78 59;          /* emerald-900 */
+  --c-support-rim: 52 211 153;      /* emerald-400 */
+  --c-autoreply-bg: 224 242 254;    /* sky-100 */
+  --c-autoreply-fg: 12 74 110;      /* sky-900 */
+  --c-autoreply-rim: 56 189 248;    /* sky-400 */
 }
 
 html,
@@ -166,9 +193,15 @@ body {
     @apply text-ink shadow-neu-pressed bg-surface;
   }
 
-  /* Chat bubble */
+  /*
+   * Chat bubble. Less rounded than before (8px instead of 16px) so the chat
+   * reads more like a modern messenger. The corner that points toward the
+   * avatar (`bottom-right` for me, `bottom-left` for them) is squared off
+   * to create a subtle speech-tail when the bubble is the last in a group;
+   * the `.bubble-tail-*` modifiers below apply the squared corner.
+   */
   .bubble {
-    @apply max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm
+    @apply max-w-[80%] rounded-lg px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm
            whitespace-pre-wrap break-words;
   }
   .bubble-me {
@@ -176,6 +209,42 @@ body {
   }
   .bubble-them {
     @apply bubble bg-surface text-ink2;
+  }
+  .bubble-tail-me {
+    /* Last bubble of my own block — squared bottom-right corner points at
+       my avatar / send-input area on the right. */
+    border-bottom-right-radius: 2px;
+  }
+  .bubble-tail-them {
+    /* Last bubble of the buyer's block — squared bottom-left corner points
+       at their avatar on the left. */
+    border-bottom-left-radius: 2px;
+  }
+
+  /*
+   * Centered system / support / autoreply card. Uses CSS custom properties
+   * (set per-theme above) instead of fixed Tailwind colors so dark and light
+   * modes both stay readable. The card uses ~14% bg tint, full fg colour,
+   * and a 35% rim border for visible contrast.
+   */
+  .msg-card {
+    @apply mx-auto max-w-[85%] rounded-lg border px-4 py-2.5 text-sm leading-relaxed
+           shadow-neu-sm whitespace-pre-wrap break-words;
+  }
+  .msg-card-system {
+    background-color: rgb(var(--c-system-bg) / 0.16);
+    color: rgb(var(--c-system-fg));
+    border-color: rgb(var(--c-system-rim) / 0.45);
+  }
+  .msg-card-support {
+    background-color: rgb(var(--c-support-bg) / 0.18);
+    color: rgb(var(--c-support-fg));
+    border-color: rgb(var(--c-support-rim) / 0.45);
+  }
+  .msg-card-autoreply-pill {
+    background-color: rgb(var(--c-autoreply-bg) / 0.18);
+    color: rgb(var(--c-autoreply-fg));
+    border-color: rgb(var(--c-autoreply-rim) / 0.45);
   }
 
   /* Chat list row */

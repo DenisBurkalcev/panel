@@ -4,16 +4,40 @@ import {
   ApiError,
   api,
   type Account,
+  type Attachment,
   type ChatMessage,
   type ChatPreview,
   type ChatThread,
+  type UploadAttachmentResult,
 } from "../api";
 import Avatar from "../components/Avatar";
+import RightSidebar from "../components/RightSidebar";
+
+// FunPay's chat form caps uploads at 7 MB and only allows images. We mirror
+// the same rules client-side so a user gets the failure feedback before the
+// payload travels to our backend.
+const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+]);
+
+// Order numbers FunPay prints in chat are 4–16 uppercase alnum chars (e.g.
+// `#EKW9ZFHL`). The lookahead/lookbehind trim avoids gluing the link onto
+// adjacent words like `email#ABC123`.
+const ORDER_RE = /(?:^|[^A-Z0-9])#([A-Z0-9]{4,16})(?=$|[^A-Z0-9])/g;
 
 export default function ChatsPage() {
   const [params, setParams] = useSearchParams();
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [accErr, setAccErr] = useState<string | null>(null);
+  // Right sidebar visibility persists across chat switches so the operator's
+  // preference is remembered for the session.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [orderId, setOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -48,6 +72,7 @@ export default function ChatsPage() {
     next.set("account", String(id));
     next.delete("chat");
     setParams(next, { replace: true });
+    setOrderId(null);
   }
 
   function selectChat(id: string) {
@@ -55,6 +80,7 @@ export default function ChatsPage() {
     if (selectedAccountId !== null) next.set("account", String(selectedAccountId));
     next.set("chat", id);
     setParams(next, { replace: true });
+    setOrderId(null);
   }
 
   if (accounts === null) {
@@ -75,8 +101,15 @@ export default function ChatsPage() {
     );
   }
 
+  // Three-column grid when the right sidebar is open, two columns otherwise.
+  // Both columns shrink/grow flexibly so the chat pane keeps its width as the
+  // sidebar collapses.
+  const gridCols = sidebarOpen
+    ? "grid-cols-[280px_minmax(0,1fr)_300px]"
+    : "grid-cols-[280px_minmax(0,1fr)]";
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <header className="flex flex-wrap items-center gap-2">
         <h1 className="mr-3 text-2xl font-semibold tracking-wide">Chats</h1>
         <div className="flex flex-wrap gap-2">
@@ -94,9 +127,36 @@ export default function ChatsPage() {
             </button>
           ))}
         </div>
+        <button
+          onClick={() => setSidebarOpen((v) => !v)}
+          className="ml-auto grid h-9 w-9 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
+          title={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
+          aria-label={sidebarOpen ? "Hide right sidebar" : "Show right sidebar"}
+          aria-pressed={sidebarOpen}
+        >
+          {/* IDE-style sidebar-toggle glyph: a rectangle with a vertical
+              divider on the right. Filled when the panel is open. */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            width="18"
+            height="18"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <line x1="15" y1="4" x2="15" y2="20" />
+            {sidebarOpen && (
+              <rect x="15" y="4" width="6" height="16" rx="0" fill="currentColor" opacity="0.18" />
+            )}
+          </svg>
+        </button>
       </header>
       {selectedAccountId !== null && (
-        <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr] gap-5">
+        <div className={`grid min-h-0 flex-1 gap-4 ${gridCols}`}>
           <ChatList
             accountId={selectedAccountId}
             activeChatId={chatId}
@@ -105,10 +165,19 @@ export default function ChatsPage() {
           <ChatPane
             accountId={selectedAccountId}
             chatId={chatId}
+            onOpenOrder={(id) => setOrderId(id)}
             // Bumping this key forces a remount when switching threads, so we
             // don't carry stale message state into a different chat.
             key={`${selectedAccountId}-${chatId ?? ""}`}
           />
+          {sidebarOpen && (
+            <RightSidebar
+              accountId={selectedAccountId}
+              chatId={chatId}
+              orderId={orderId}
+              onCloseOrder={() => setOrderId(null)}
+            />
+          )}
         </div>
       )}
     </div>
@@ -208,16 +277,22 @@ function ChatList({
 function ChatPane({
   accountId,
   chatId,
+  onOpenOrder,
 }: {
   accountId: number;
   chatId: string | null;
+  onOpenOrder: (orderId: string) => void;
 }) {
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingPreview, setPendingPreview] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Tracks whether the user is currently parked at the bottom of the message
   // list. We only auto-scroll on poll updates if true — otherwise scrolling
   // up to read history would yank the operator back to the bottom every
@@ -265,6 +340,17 @@ function ChatPane({
     }
   }, [thread]);
 
+  // Free the object URL we generated for the preview when the file changes.
+  useEffect(() => {
+    if (!pendingFile) {
+      setPendingPreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(pendingFile);
+    setPendingPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pendingFile]);
+
   function onMessagesScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget;
     // 80px tolerance so a couple of pixels of scroll-jitter still counts as
@@ -287,20 +373,56 @@ function ChatPane({
     autosizeInput();
   }, [text]);
 
+  function pickFile(file: File | null) {
+    if (!file) return;
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      setErr(
+        "FunPay accepts only PNG/JPG/GIF/WebP images. " +
+          "For other files paste a download URL into the message text."
+      );
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setErr(
+        `Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — FunPay caps uploads at 7 MB.`
+      );
+      return;
+    }
+    setErr(null);
+    setPendingFile(file);
+  }
+
+  function clearPendingFile() {
+    setPendingFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
   async function send() {
-    if (chatId === null || !text.trim() || sending) return;
+    if (chatId === null || sending) return;
+    if (!text.trim() && !pendingFile) return;
     // Sending is an explicit user intent to bring the thread to the
     // bottom — re-pin the auto-scroll regardless of where they were.
     stickToBottomRef.current = true;
     setSending(true);
     setErr(null);
     try {
+      let imageId: string | null = null;
+      if (pendingFile) {
+        const upload = await api.upload<UploadAttachmentResult>(
+          `/api/accounts/${accountId}/chats/${encodeURIComponent(chatId)}/attachments`,
+          pendingFile
+        );
+        imageId = upload.image_id;
+      }
+      const body: { text: string; image_id?: string } = { text };
+      if (imageId) body.image_id = imageId;
       const updated = await api.post<ChatThread>(
         `/api/accounts/${accountId}/chats/${encodeURIComponent(chatId)}/messages`,
-        { text }
+        body
       );
       setThread(updated);
       setText("");
+      clearPendingFile();
     } catch (e) {
       setErr(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -323,6 +445,28 @@ function ChatPane({
     }
   }
 
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    // Paste-from-screenshot: capture the first image in the clipboard, drop
+    // it into the pending-file slot. Lets the user Win+Shift+S a region and
+    // immediately Ctrl-V into the chat — the same flow as Slack/Discord.
+    const item = Array.from(e.clipboardData.items).find((it) =>
+      it.type.startsWith("image/")
+    );
+    if (!item) return;
+    const file = item.getAsFile();
+    if (file) {
+      e.preventDefault();
+      pickFile(file);
+    }
+  }
+
+  function onDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) pickFile(file);
+  }
+
   if (chatId === null) {
     return (
       <div className="card grid place-items-center text-sm text-muted">
@@ -335,7 +479,24 @@ function ChatPane({
   const peerName = thread?.title || chatId;
 
   return (
-    <div className="card flex min-h-0 flex-col">
+    <div
+      className={`card relative flex min-h-0 flex-col ${
+        dragOver ? "ring-2 ring-ink/30" : ""
+      }`}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-surface/80 text-sm text-ink">
+          Drop image to attach
+        </div>
+      )}
       <div className="mb-3 flex items-center justify-between gap-3 border-b border-line/40 pb-3">
         <div className="flex min-w-0 items-center gap-3">
           <Avatar name={peerName} src={peerAvatar} size="md" />
@@ -370,7 +531,7 @@ function ChatPane({
       <div
         ref={messagesRef}
         onScroll={onMessagesScroll}
-        className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1 pb-3"
+        className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1 pb-3"
       >
         {thread === null ? (
           <div className="text-sm text-muted">Loading…</div>
@@ -381,14 +542,58 @@ function ChatPane({
             <MessageRow
               key={`${m.id ?? i}`}
               message={m}
+              prev={i > 0 ? thread.messages[i - 1] : null}
               peerAvatar={peerAvatar}
               peerName={peerName}
+              onOpenOrder={onOpenOrder}
             />
           ))
         )}
       </div>
       {err && <div className="mt-2 text-sm text-danger">{err}</div>}
+      {pendingFile && pendingPreview && (
+        <div className="mt-2 flex items-center gap-3 rounded-xl bg-surface2 p-2 shadow-neu-inset">
+          <img
+            src={pendingPreview}
+            alt={pendingFile.name}
+            className="h-12 w-12 rounded-lg object-cover"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm">{pendingFile.name}</div>
+            <div className="text-xs text-muted">
+              {(pendingFile.size / 1024).toFixed(0)} KB
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={clearPendingFile}
+            className="grid h-8 w-8 place-items-center rounded-lg text-ink2 hover:text-ink"
+            title="Remove attachment"
+            aria-label="Remove attachment"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <form onSubmit={onFormSubmit} className="mt-3 flex items-end gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          className="hidden"
+          onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="grid h-10 w-10 flex-shrink-0 place-items-center rounded-xl bg-surface text-ink2 shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed"
+          title="Attach image"
+          aria-label="Attach image"
+          disabled={sending}
+        >
+          {/* Paperclip glyph mirrors FunPay's own attach button */}
+          📎
+        </button>
         <textarea
           ref={inputRef}
           className="input min-h-[2.5rem] max-h-36 resize-none leading-relaxed"
@@ -397,9 +602,13 @@ function ChatPane({
           rows={1}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onInputKeyDown}
+          onPaste={onPaste}
           disabled={sending}
         />
-        <button className="btn-primary" disabled={sending || !text.trim()}>
+        <button
+          className="btn-primary"
+          disabled={sending || (!text.trim() && !pendingFile)}
+        >
           {sending ? "Sending…" : "Send"}
         </button>
       </form>
@@ -412,87 +621,206 @@ function ChatPane({
 // поддержка) without requiring an i18n layer for a single feature.
 const KIND_BADGE: Record<
   Exclude<ChatMessage["kind"], "regular">,
-  { label: string; chip: string; tone: string }
+  { label: string; cardClass: string; pillClass: string }
 > = {
   system: {
     label: "Сообщение от системы",
-    chip:
-      "border border-amber-300/60 bg-amber-50 text-amber-800 " +
-      "dark:border-amber-400/40 dark:bg-amber-400/10 dark:text-amber-200",
-    tone: "text-amber-700 dark:text-amber-300",
+    cardClass: "msg-card msg-card-system",
+    pillClass: "msg-card-system",
   },
   support: {
     label: "Сообщение от поддержки FunPay",
-    chip:
-      "border border-emerald-300/60 bg-emerald-50 text-emerald-800 " +
-      "dark:border-emerald-400/40 dark:bg-emerald-400/10 dark:text-emerald-200",
-    tone: "text-emerald-700 dark:text-emerald-300",
+    cardClass: "msg-card msg-card-support",
+    pillClass: "msg-card-support",
   },
   autoreply: {
+    // Autoreply is rendered as an inline pill above the seller's bubble,
+    // not as a centered card — it's a regular message with extra context.
     label: "Автоответ",
-    chip:
-      "border border-sky-300/50 bg-sky-50 text-sky-800 " +
-      "dark:border-sky-400/30 dark:bg-sky-400/10 dark:text-sky-200",
-    tone: "text-sky-700 dark:text-sky-300",
+    cardClass: "",
+    pillClass: "msg-card-autoreply-pill",
   },
 };
 
 function MessageRow({
   message,
+  prev,
   peerAvatar,
   peerName,
+  onOpenOrder,
 }: {
   message: ChatMessage;
+  prev: ChatMessage | null;
   peerAvatar: string | null;
   peerName: string;
+  onOpenOrder: (orderId: string) => void;
 }) {
+  // Increase vertical spacing whenever the kind changes between adjacent
+  // messages — that's what creates a visible gap between buyer/seller
+  // exchanges and the system/support announcements that FunPay interleaves
+  // with them.
+  const kindChanged = !prev || prev.kind !== message.kind;
+  const extraSpacing =
+    (kindChanged && (message.kind !== "regular" || (prev && prev.kind !== "regular")))
+      ? "mt-4"
+      : message.is_group_first
+        ? "mt-2"
+        : "";
+
   if (message.kind === "system" || message.kind === "support") {
     const meta = KIND_BADGE[message.kind];
     return (
-      <div className="flex justify-center px-4">
-        <div
-          className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm whitespace-pre-wrap break-words ${meta.chip}`}
-        >
-          <div
-            className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${meta.tone}`}
-          >
+      <div className={`flex justify-center px-4 ${extraSpacing}`}>
+        <div className={meta.cardClass}>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider opacity-80">
             {meta.label}
-            {message.label ? ` • ${message.label}` : ""}
+            {message.label && (
+              <>
+                <span className="mx-1.5 opacity-50">•</span>
+                <span>{message.label}</span>
+              </>
+            )}
           </div>
-          {message.text}
+          <MessageContent message={message} onOpenOrder={onOpenOrder} />
         </div>
       </div>
     );
   }
 
-  const showPeerAvatar = !message.is_me;
-  const authorName = message.author ?? peerName;
-  const isAutoreply = message.kind === "autoreply";
-  const meta = isAutoreply ? KIND_BADGE.autoreply : null;
+  const mine = message.is_me;
+  const showAvatar = !mine && message.is_group_last;
+  const showAuthor = !mine && message.is_group_first && message.kind !== "autoreply";
+
+  const bubbleClass = [
+    mine ? "bubble-me" : "bubble-them",
+    message.is_group_last ? (mine ? "bubble-tail-me" : "bubble-tail-them") : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div
-      className={`flex items-end gap-2 ${
-        message.is_me ? "justify-end" : "justify-start"
-      }`}
-    >
-      {showPeerAvatar && <Avatar name={authorName} src={peerAvatar} size="sm" />}
-      <div className={message.is_me ? "bubble-me" : "bubble-them"}>
-        {!message.is_me && message.author && (
-          <div className="mb-0.5 text-[10px] uppercase tracking-wider text-muted">
-            {message.author}
+    <div className={`flex w-full ${mine ? "justify-end" : "justify-start"} ${extraSpacing}`}>
+      <div
+        className={`flex w-full max-w-[80%] items-end gap-2 ${
+          mine ? "flex-row-reverse" : ""
+        }`}
+      >
+        {!mine && (
+          <div className="flex h-9 w-9 flex-shrink-0 items-end">
+            {showAvatar ? (
+              <Avatar name={message.author || peerName} src={peerAvatar} size="md" />
+            ) : (
+              // Empty placeholder keeps grouped bubbles aligned with the
+              // bottom-most one that does carry the avatar.
+              <span className="h-9 w-9" aria-hidden />
+            )}
           </div>
         )}
-        {meta && (
-          <div
-            className={`mb-1 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${meta.chip}`}
-          >
-            {meta.label}
+        <div className={`flex min-w-0 flex-col gap-1 ${mine ? "items-end" : "items-start"}`}>
+          {showAuthor && (
+            <div className="px-1 text-xs font-medium text-ink2">
+              {message.author || peerName}
+            </div>
+          )}
+          {message.kind === "autoreply" && message.is_group_first && (
+            <span
+              className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${KIND_BADGE.autoreply.pillClass}`}
+            >
+              {KIND_BADGE.autoreply.label}
+            </span>
+          )}
+          <div className={bubbleClass}>
+            <MessageContent message={message} onOpenOrder={onOpenOrder} />
           </div>
-        )}
-        <div>{message.text}</div>
+        </div>
       </div>
     </div>
   );
 }
 
+function MessageContent({
+  message,
+  onOpenOrder,
+}: {
+  message: ChatMessage;
+  onOpenOrder: (orderId: string) => void;
+}) {
+  return (
+    <>
+      {message.attachments.map((att, i) => (
+        <AttachmentView key={`${att.href}-${i}`} attachment={att} />
+      ))}
+      {message.text && (
+        <div className="leading-relaxed">
+          <RichText text={message.text} onOpenOrder={onOpenOrder} />
+        </div>
+      )}
+    </>
+  );
+}
 
+function AttachmentView({ attachment }: { attachment: Attachment }) {
+  if (attachment.kind === "image") {
+    return (
+      <a
+        href={attachment.href}
+        target="_blank"
+        rel="noreferrer"
+        className="block overflow-hidden rounded-md bg-surface2"
+        title={attachment.name ?? "Open image"}
+      >
+        <img
+          src={attachment.src}
+          alt={attachment.name ?? ""}
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+          className="block max-h-[320px] max-w-full object-contain"
+        />
+      </a>
+    );
+  }
+  return null;
+}
+
+/**
+ * Render text with order-number links (`#XXXXXXXX`) made clickable. Order
+ * clicks open the right sidebar with that order's details. Anything else
+ * is rendered as plain text — FunPay already inlines URLs as `<a>` in the
+ * raw HTML, but our parser strips those tags; restoring URL auto-linking
+ * is intentionally out of scope for this change to keep the renderer
+ * simple and XSS-free (we never inject HTML, only render plain text).
+ */
+function RichText({
+  text,
+  onOpenOrder,
+}: {
+  text: string;
+  onOpenOrder: (orderId: string) => void;
+}) {
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  ORDER_RE.lastIndex = 0;
+  while ((m = ORDER_RE.exec(text)) !== null) {
+    const [full, id] = m;
+    const lead = full.startsWith("#") ? "" : full[0];
+    const matchStart = m.index + lead.length;
+    const matchEnd = matchStart + 1 + id.length;
+    if (matchStart > last) out.push(text.slice(last, matchStart));
+    out.push(
+      <button
+        key={`${id}-${matchStart}`}
+        type="button"
+        onClick={() => onOpenOrder(id)}
+        className="rounded bg-surface2 px-1 font-mono text-[12px] text-ink underline-offset-2 hover:underline"
+        title={`Open order #${id}`}
+      >
+        #{id}
+      </button>
+    );
+    last = matchEnd;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return <>{out}</>;
+}

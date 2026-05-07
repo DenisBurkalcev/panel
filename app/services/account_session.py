@@ -25,7 +25,14 @@ import logging
 import time
 from dataclasses import dataclass
 
-from app.schemas.chat import ChatMessage, ChatPreview, ChatThread, SendMessageRequest
+from app.schemas.chat import (
+    ChatMessage,
+    ChatPreview,
+    ChatThread,
+    OrderInfo,
+    ProductInfo,
+    SendMessageRequest,
+)
 from app.services.funpay_client import (
     ChatHeader,
     FunPayClient,
@@ -164,6 +171,10 @@ class AccountSession:
              system / autoreply messages, where the message-derived title would
              fall back to a `users-A-B` token).
           3. The original `thread.title` value (chat id placeholder).
+
+        Also computes message-grouping flags (`is_group_first`, `is_group_last`)
+        across the message list so the frontend can collapse runs of consecutive
+        messages from the same author into a single visual block.
         """
         title = thread.title
         peer_avatar = thread.peer_avatar_url
@@ -180,16 +191,11 @@ class AccountSession:
                 if preview.id == thread.id and preview.avatar_url:
                     peer_avatar = preview.avatar_url
                     break
-        if (
-            title == thread.title
-            and peer_avatar == thread.peer_avatar_url
-            and peer_online == thread.peer_online
-        ):
-            return thread
+        grouped = _compute_grouping(thread.messages)
         return ChatThread(
             id=thread.id,
             title=title,
-            messages=thread.messages,
+            messages=grouped,
             peer_avatar_url=peer_avatar,
             peer_online=peer_online,
         )
@@ -201,7 +207,9 @@ class AccountSession:
             # Only invalidate caches *after* a successful send — a failed send
             # shouldn't blow away the chat list and force the next poll to
             # round-trip to FunPay for nothing.
-            await self._client.send_message(chat_id, payload.text)
+            await self._client.send_message(
+                chat_id, payload.text, image_id=payload.image_id
+            )
             entry = self._threads.get(chat_id)
             if entry is not None:
                 thread = entry.payload
@@ -224,6 +232,75 @@ class AccountSession:
             return await self.get_chat(chat_id, fresh=True)
         except FunPayError:
             return ChatThread(id=chat_id, title=chat_id, messages=[new_msg])
+
+    async def upload_chat_image(
+        self, *, filename: str, content_type: str, content: bytes
+    ) -> str:
+        await self._ensure_open()
+        return await self._client.upload_chat_image(
+            filename=filename, content_type=content_type, content=content
+        )
+
+    async def fetch_current_product(self, chat_id: str) -> ProductInfo:
+        await self._ensure_open()
+        async with self._lock:
+            now = time.monotonic()
+            header = await self._fetch_header_locked(chat_id, now=now, fresh=False)
+        peer_id = header.user_id if header is not None else None
+        return await self._client.fetch_current_product(chat_id, peer_user_id=peer_id)
+
+    async def fetch_order(self, order_id: str) -> OrderInfo:
+        await self._ensure_open()
+        return await self._client.fetch_order(order_id)
+
+
+# 5 minutes is the same window most messengers use to decide whether two
+# adjacent messages from the same author belong to the same "block". Wider
+# than that and you start grouping unrelated conversations across hours.
+_GROUP_WINDOW_SECONDS = 300
+
+
+def _compute_grouping(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Mark consecutive same-author messages with `is_group_first/last` flags.
+
+    Two adjacent messages join the same block iff they have the same `is_me`
+    flag, the same author, the same kind (so a system notification isn't
+    swallowed by an adjacent regular message), and were sent within the same
+    5-minute window. The first message in a block keeps `is_group_first=True`
+    and the last gets `is_group_last=True`; middle messages have both False
+    so the frontend hides their avatar/username.
+    """
+    if not messages:
+        return messages
+
+    n = len(messages)
+    # Same-block predicate between message i and i+1.
+    in_same_group: list[bool] = [False] * n
+    for i in range(n - 1):
+        a, b = messages[i], messages[i + 1]
+        if a.kind != b.kind or a.is_me != b.is_me or a.author != b.author:
+            in_same_group[i] = False
+            continue
+        if a.sent_at and b.sent_at:
+            delta = (b.sent_at - a.sent_at).total_seconds()
+            if delta > _GROUP_WINDOW_SECONDS or delta < -_GROUP_WINDOW_SECONDS:
+                in_same_group[i] = False
+                continue
+        in_same_group[i] = True
+
+    out: list[ChatMessage] = []
+    for i, msg in enumerate(messages):
+        is_first = i == 0 or not in_same_group[i - 1]
+        is_last = i == n - 1 or not in_same_group[i]
+        if msg.is_group_first == is_first and msg.is_group_last == is_last:
+            out.append(msg)
+        else:
+            out.append(
+                msg.model_copy(
+                    update={"is_group_first": is_first, "is_group_last": is_last}
+                )
+            )
+    return out
 
 
 class AccountSessionManager:

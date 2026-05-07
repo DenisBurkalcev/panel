@@ -25,7 +25,16 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from app.config import get_settings
-from app.schemas.chat import ChatMessage, ChatPreview, ChatThread, MessageKind
+from app.schemas.chat import (
+    Attachment,
+    ChatMessage,
+    ChatPreview,
+    ChatThread,
+    MessageKind,
+    OrderInfo,
+    OrderItem,
+    ProductInfo,
+)
 
 log = logging.getLogger("funpay.client")
 _settings = get_settings()
@@ -492,6 +501,50 @@ class FunPayClient:
             ):
                 interlocutor_name = author
 
+            # Pull image attachments *before* we strip the scaffolding —
+            # FunPay renders image messages as
+            # `<a class="chat-img-link" href="<full>"><img class="chat-img"
+            # src="<thumb>"></a>` inside the same `.chat-msg-text` block.
+            # Without this we'd silently drop image-only messages along with
+            # the avatar/img cleanup below.
+            attachments: list[Attachment] = []
+            for img_link in soup.select("a.chat-img-link"):
+                href = img_link.get("href")
+                if not isinstance(href, str) or not href:
+                    continue
+                inner_img = img_link.find("img")
+                src = href
+                name: str | None = None
+                width: int | None = None
+                height: int | None = None
+                if isinstance(inner_img, Tag):
+                    raw_src = inner_img.get("src")
+                    if isinstance(raw_src, str) and raw_src:
+                        src = raw_src
+                    raw_name = inner_img.get("alt")
+                    if isinstance(raw_name, str) and raw_name:
+                        name = raw_name
+                    raw_w = inner_img.get("width")
+                    raw_h = inner_img.get("height")
+                    try:
+                        width = int(raw_w) if isinstance(raw_w, str) else None
+                    except ValueError:
+                        width = None
+                    try:
+                        height = int(raw_h) if isinstance(raw_h, str) else None
+                    except ValueError:
+                        height = None
+                attachments.append(
+                    Attachment(
+                        kind="image",
+                        src=urljoin(_settings.funpay_base_url, src),
+                        href=urljoin(_settings.funpay_base_url, href),
+                        name=name,
+                        width=width,
+                        height=height,
+                    )
+                )
+
             # Strip non-message scaffolding (avatar, header link with the
             # username, day-divider date, per-message timestamp tooltip,
             # role-labels like "автоответ" / "оповещение", and any image
@@ -530,6 +583,7 @@ class FunPayClient:
                     sent_at=sent_at,
                     kind=kind,
                     label=label_text,
+                    attachments=attachments,
                 )
             )
         # Fall back to FunPay's internal node name only when nothing better
@@ -546,18 +600,33 @@ class FunPayClient:
     # Send message
     # ------------------------------------------------------------------
 
-    async def send_message(self, chat_id: str, text: str) -> None:
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        image_id: str | None = None,
+    ) -> None:
         if not _CHAT_ID_RE.match(chat_id):
             raise FunPayError("Invalid chat id")
-        if not text or not text.strip():
+        if image_id is None and (not text or not text.strip()):
             raise FunPayError("Empty message")
+        if image_id is not None and not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", image_id):
+            raise FunPayError("Invalid image_id")
         profile = await self.fetch_profile()
         coerced = _coerce_chat_id(chat_id)
 
-        request = {
-            "action": "chat_message",
-            "data": {"node": coerced, "last_message": -1, "content": text},
+        data: dict[str, Any] = {
+            "node": coerced,
+            "last_message": -1,
+            "content": text or "",
         }
+        if image_id is not None:
+            # FunPay's frontend clears `content` when it sends an image-only
+            # message; we forward what the caller asked for, image-only
+            # included.
+            data["image_id"] = image_id
+        request = {"action": "chat_message", "data": data}
         objects = [
             {
                 "type": "chat_node",
@@ -600,6 +669,122 @@ class FunPayClient:
             raise FunPayMessageRejected(str(error_text))
 
     # ------------------------------------------------------------------
+    # Image upload (POST /file/addChatImage → JSON `{fileId: ...}`)
+    # ------------------------------------------------------------------
+
+    async def upload_chat_image(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        content: bytes,
+    ) -> str:
+        profile = await self.fetch_profile()
+        url = urljoin(_settings.funpay_base_url, "/file/addChatImage")
+        try:
+            resp = await self.http.post(
+                url,
+                data={"csrf_token": profile.csrf_token},
+                files={"file": (filename, content, content_type)},
+                headers={
+                    "Accept": "*/*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Origin": _settings.funpay_base_url,
+                    "Referer": _settings.funpay_base_url + "/chat/",
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise FunPayError(f"Network error: {exc}") from exc
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise FunPayError("FunPay returned non-JSON for /file/addChatImage") from exc
+        if resp.status_code in (401, 403):
+            raise FunPayAuthError(
+                f"FunPay refused /file/addChatImage ({resp.status_code})"
+            )
+        if isinstance(payload, dict) and payload.get("error"):
+            # FunPay returns `{"msg": "...", "error": 1}` on validation failure.
+            raise FunPayMessageRejected(str(payload.get("msg") or payload.get("error")))
+        if resp.status_code >= 400:
+            raise FunPayError(
+                f"FunPay /file/addChatImage returned HTTP {resp.status_code}"
+            )
+        if not isinstance(payload, dict):
+            raise FunPayError("Unexpected /file/addChatImage response shape")
+        file_id = payload.get("fileId") or payload.get("file_id") or payload.get("id")
+        if file_id is None:
+            raise FunPayError("FunPay didn't return fileId for the uploaded image")
+        return str(file_id)
+
+    # ------------------------------------------------------------------
+    # Currently viewed offer (chat-panel-user runner object)
+    # ------------------------------------------------------------------
+
+    async def fetch_current_product(
+        self, chat_id: str, *, peer_user_id: int | None
+    ) -> ProductInfo:
+        """Fetch the offer the buyer is currently viewing, if any.
+
+        FunPay populates a hidden `.chat-panel` div on the chat page via a
+        `/runner/` request with `type=c-p-u` (chat-panel-user). When the
+        buyer isn't browsing one of our offers the `data.html` field comes
+        back as an empty list; otherwise it's an HTML snippet describing
+        the offer (title, price, link).
+        """
+        if not _CHAT_ID_RE.match(chat_id):
+            raise FunPayError("Invalid chat id")
+        if peer_user_id is None:
+            return ProductInfo(available=False)
+        profile = await self.fetch_profile()
+        coerced = _coerce_chat_id(chat_id)
+        objects = [
+            {
+                "type": "c-p-u",
+                "id": peer_user_id,
+                "tag": _random_tag(),
+                "data": False,
+            }
+        ]
+        body = await self._runner_post(
+            objects=objects,
+            request=False,
+            csrf=profile.csrf_token,
+            referer=f"/chat/?node={coerced}",
+        )
+        html_blob = ""
+        for obj in body.get("objects") or []:
+            if obj.get("type") == "c-p-u":
+                data = obj.get("data") or {}
+                raw = data.get("html")
+                if isinstance(raw, str) and raw.strip():
+                    html_blob = raw
+                break
+        if not html_blob:
+            return ProductInfo(available=False)
+        return _parse_product_panel(html_blob)
+
+    # ------------------------------------------------------------------
+    # Order details (HTML page /orders/<id>/)
+    # ------------------------------------------------------------------
+
+    async def fetch_order(self, order_id: str) -> OrderInfo:
+        if not re.fullmatch(r"[A-Za-z0-9]{4,16}", order_id):
+            raise FunPayError("Invalid order id")
+        url = urljoin(_settings.funpay_base_url, f"/orders/{order_id}/")
+        try:
+            resp = await self.http.get(url)
+        except httpx.HTTPError as exc:
+            raise FunPayError(f"Network error: {exc}") from exc
+        if resp.status_code == 404:
+            raise FunPayError(f"Order {order_id} not found on FunPay")
+        if resp.status_code in (401, 403):
+            raise FunPayAuthError(f"FunPay refused /orders/{order_id} ({resp.status_code})")
+        if resp.status_code != 200:
+            raise FunPayError(f"FunPay returned HTTP {resp.status_code} for /orders/{order_id}")
+        return _parse_order_page(resp.text, order_id=order_id, url=url)
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
@@ -640,6 +825,105 @@ class FunPayClient:
         if not isinstance(data, dict):
             raise FunPayError("Unexpected /runner/ response shape (not an object)")
         return data
+
+
+# Order numbers FunPay prints in chat are eight uppercase alnum chars
+# (e.g. `#EKW9ZFHL`). Restricting to A–Z + 0–9 keeps the link recogniser
+# from latching onto random hashtags or hex hashes.
+ORDER_RE = re.compile(r"#([A-Z0-9]{4,16})")
+
+
+def _parse_product_panel(html_blob: str) -> ProductInfo:
+    """Parse the `c-p-u` runner panel HTML into a `ProductInfo`."""
+    soup = BeautifulSoup(html_blob, "lxml")
+    # The panel is rendered as a small card. We try a few selectors so we
+    # don't break on minor markup tweaks; the underlying intent is to pick
+    # out a title link, a price chip, and a description fragment.
+    title_node = soup.select_one("a, .chat-panel-title, h3, .name")
+    title: str | None = None
+    href: str | None = None
+    if isinstance(title_node, Tag):
+        title = (title_node.get_text(strip=True) or None) if title_node else None
+        raw_href = title_node.get("href") if title_node else None
+        if isinstance(raw_href, str) and raw_href:
+            href = urljoin(_settings.funpay_base_url, raw_href)
+    price_node = soup.select_one(".chat-panel-price, .price, .text-bold")
+    price: str | None = None
+    if isinstance(price_node, Tag):
+        price = (price_node.get_text(" ", strip=True) or None) if price_node else None
+    desc_node = soup.select_one(".chat-panel-desc, .desc, p")
+    desc: str | None = None
+    if isinstance(desc_node, Tag):
+        desc = (desc_node.get_text(" ", strip=True) or None) if desc_node else None
+    if title is None and price is None and desc is None:
+        # Markup unfamiliar — return the panel text raw rather than dropping
+        # the data on the floor.
+        title = soup.get_text(" ", strip=True)[:120] or None
+    return ProductInfo(
+        available=True,
+        title=title,
+        price=price,
+        description=desc,
+        url=href,
+    )
+
+
+def _parse_order_page(html: str, *, order_id: str, url: str) -> OrderInfo:
+    """Parse `/orders/<id>/` into an `OrderInfo` ready for the side panel."""
+    soup = BeautifulSoup(html, "lxml")
+    h1 = soup.select_one("h1")
+    title: str | None = None
+    status: str | None = None
+    if isinstance(h1, Tag):
+        # H1 looks like `Заказ #EKW9ZFHL Закрыт`. Split off the order id and
+        # everything after it as the status badge.
+        full = h1.get_text(" ", strip=True)
+        m = re.match(r"(Заказ\s+#" + re.escape(order_id) + r")\s*(.*)", full)
+        if m:
+            title = m.group(1)
+            status = (m.group(2) or "").strip() or None
+        else:
+            title = full or None
+
+    buyer: str | None = None
+    media_body = soup.select_one(".media-body")
+    if isinstance(media_body, Tag):
+        buyer_link = media_body.select_one("a, .media-user-name")
+        if isinstance(buyer_link, Tag):
+            buyer = buyer_link.get_text(" ", strip=True) or None
+        if buyer is None:
+            buyer = media_body.get_text(" ", strip=True).split(" ", 1)[0] or None
+
+    items: list[OrderItem] = []
+    total: str | None = None
+    pl = soup.select_one(".param-list")
+    if isinstance(pl, Tag):
+        # FunPay's `.param-list` interleaves `<h5>label</h5> <div>value</div>`
+        # at the same level. Walk children pairwise so we pick up the order
+        # they're rendered in (Игра, Категория, Краткое описание, ..., Сумма).
+        children = [c for c in pl.children if isinstance(c, Tag)]
+        i = 0
+        while i + 1 < len(children):
+            if children[i].name == "h5":
+                label = children[i].get_text(" ", strip=True)
+                value = children[i + 1].get_text(" ", strip=True)
+                if label and value:
+                    items.append(OrderItem(label=label, value=value))
+                    if label.lower().startswith("сумм"):
+                        total = value
+                i += 2
+            else:
+                i += 1
+
+    return OrderInfo(
+        id=order_id,
+        title=title,
+        status=status,
+        buyer=buyer,
+        items=items,
+        total=total,
+        url=url,
+    )
 
 
 def _parse_message_timestamp(raw: dict[str, Any]) -> datetime | None:
