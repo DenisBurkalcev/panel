@@ -1,0 +1,310 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme tokens. Triplets so Tailwind's `<alpha-value>` placeholder keeps
+ * composing utilities like `border-line/40` correctly.
+ *
+ * Dark (default): black surface, soft inset/outset highlights.
+ * Light: bright neutral surface with desaturated greys for shadows.
+ */
+:root {
+  color-scheme: dark;
+  --c-bg: 10 10 10;
+  --c-surface: 17 17 17;
+  --c-surface2: 22 22 22;
+  --c-rim: 31 31 31;
+  --c-line: 38 38 38;
+  --c-ink: 245 245 245;
+  --c-ink2: 207 207 207;
+  --c-muted: 124 124 124;
+  --c-accent: 255 255 255;
+  --c-danger: 248 113 113;
+  --c-success: 52 211 153;
+
+  --neu-shadow-dark: rgba(0, 0, 0, 0.65);
+  --neu-shadow-light: rgba(60, 60, 60, 0.10);
+
+  --bg-grad-1: rgba(255, 255, 255, 0.025);
+  --bg-grad-2: rgba(255, 255, 255, 0.018);
+
+  --scrollbar-track: #0a0a0a;
+  --scrollbar-thumb: #1f1f1f;
+  --scrollbar-thumb-hover: #2a2a2a;
+
+  /*
+   * Per-message-kind tokens. Triplets so utility classes can reuse them as
+   * `bg-[rgb(var(--c-system-bg)/0.18)]`. Dark-mode defaults: muted, low-
+   * saturation tints that stay readable against the dark surface; the
+   * `.light` block below swaps to higher-contrast versions for light mode.
+   */
+  --c-system-bg: 251 191 36;        /* amber-400 */
+  --c-system-fg: 252 211 77;        /* amber-300 */
+  --c-system-rim: 217 119 6;        /* amber-600 */
+  --c-support-bg: 52 211 153;       /* emerald-400 */
+  --c-support-fg: 110 231 183;      /* emerald-300 */
+  --c-support-rim: 5 150 105;       /* emerald-600 */
+  --c-autoreply-bg: 56 189 248;     /* sky-400 */
+  --c-autoreply-fg: 125 211 252;    /* sky-300 */
+  --c-autoreply-rim: 2 132 199;     /* sky-600 */
+}
+
+html.light {
+  color-scheme: light;
+  --c-bg: 232 232 235;
+  --c-surface: 240 240 243;
+  --c-surface2: 226 226 230;
+  --c-rim: 214 214 219;
+  --c-line: 199 199 205;
+  --c-ink: 24 24 27;
+  --c-ink2: 64 64 70;
+  --c-muted: 110 110 116;
+  --c-accent: 24 24 27;
+  --c-danger: 185 28 28;
+  --c-success: 5 122 85;
+
+  --neu-shadow-dark: rgba(166, 168, 173, 0.55);
+  --neu-shadow-light: rgba(255, 255, 255, 0.95);
+
+  --bg-grad-1: rgba(0, 0, 0, 0.03);
+  --bg-grad-2: rgba(0, 0, 0, 0.02);
+
+  --scrollbar-track: #e8e8eb;
+  --scrollbar-thumb: #c5c5cb;
+  --scrollbar-thumb-hover: #a8a8b0;
+
+  /* Brighter, higher-contrast text on a soft tint for light mode. */
+  --c-system-bg: 254 243 199;       /* amber-100 */
+  --c-system-fg: 120 53 15;         /* amber-900 */
+  --c-system-rim: 251 191 36;       /* amber-400 */
+  --c-support-bg: 209 250 229;      /* emerald-100 */
+  --c-support-fg: 6 78 59;          /* emerald-900 */
+  --c-support-rim: 52 211 153;      /* emerald-400 */
+  --c-autoreply-bg: 224 242 254;    /* sky-100 */
+  --c-autoreply-fg: 12 74 110;      /* sky-900 */
+  --c-autoreply-rim: 56 189 248;    /* sky-400 */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 800px at 0% 0%, var(--bg-grad-1), transparent 60%),
+    radial-gradient(1200px 800px at 100% 100%, var(--bg-grad-2), transparent 60%),
+    rgb(var(--c-bg));
+  color: rgb(var(--c-ink));
+  font-feature-settings: "cv11", "ss01";
+  /*
+   * Animate the page-wide colour swap so the theme toggle feels smooth.
+   * 200ms keeps the animation snappy without being distracting.
+   */
+  transition:
+    background-color 200ms ease,
+    color 200ms ease;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+@layer components {
+  /* Neumorphism primitives */
+  .neu {
+    @apply rounded-2xl bg-surface shadow-neu;
+  }
+  .neu-sm {
+    @apply rounded-xl bg-surface shadow-neu-sm;
+  }
+  .neu-inset {
+    @apply rounded-xl bg-surface shadow-neu-inset;
+  }
+  .neu-pressed {
+    @apply rounded-xl bg-surface shadow-neu-pressed;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium
+           transition-all disabled:cursor-not-allowed disabled:opacity-40 select-none;
+  }
+  .btn-primary {
+    @apply btn bg-surface text-ink shadow-neu-sm
+           hover:shadow-neu-pressed hover:translate-y-px active:shadow-neu-pressed;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-ink2 hover:bg-surface2 hover:text-ink;
+  }
+  .btn-danger {
+    @apply btn bg-surface text-danger shadow-neu-sm
+           hover:shadow-neu-pressed active:shadow-neu-pressed;
+  }
+  .btn-icon {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-xl bg-surface text-ink2
+           shadow-neu-sm transition-shadow hover:text-ink hover:shadow-neu-pressed;
+  }
+
+  /* Inputs */
+  .input {
+    @apply w-full rounded-xl bg-surface px-3 py-2 text-sm text-ink shadow-neu-inset
+           placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-ink/15;
+  }
+
+  /* Card / surface */
+  .card {
+    @apply neu p-6;
+  }
+  .card-tight {
+    @apply neu-sm p-4;
+  }
+
+  /* Pill chip */
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-[11px]
+           font-medium uppercase tracking-wider text-ink2 shadow-neu-inset;
+  }
+
+  /* Form label */
+  .label {
+    @apply mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-muted;
+  }
+
+  /* Sidebar nav link */
+  .nav-link {
+    @apply flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-ink2
+           transition-shadow hover:text-ink;
+  }
+  .nav-link-active {
+    @apply text-ink shadow-neu-pressed bg-surface;
+  }
+
+  /*
+   * Chat bubble. Less rounded than before (8px instead of 16px) so the chat
+   * reads more like a modern messenger. The corner that points toward the
+   * avatar (`bottom-right` for me, `bottom-left` for them) is squared off
+   * to create a subtle speech-tail when the bubble is the last in a group;
+   * the `.bubble-tail-*` modifiers below apply the squared corner.
+   *
+   * Width is intentionally NOT capped here — the wrapping flex container
+   * in `MessageRow` enforces `max-w-[80%]` against the chat pane, which
+   * is a definite width. Putting another `max-width: <%>` on the bubble
+   * makes the bubble's containing block (the auto-sized
+   * `bubble-col`) iteratively shrink until short Cyrillic words like
+   * "здравствуйте" get hyphenated mid-word. Letting the bubble take its
+   * natural width (clipped by the parent flex) wraps text only at word
+   * boundaries when it actually overflows the 80% pane budget.
+   */
+  .bubble {
+    @apply rounded-lg px-4 py-2.5 text-sm leading-relaxed shadow-neu-sm
+           whitespace-pre-wrap [overflow-wrap:anywhere];
+  }
+  .bubble-me {
+    @apply bubble bg-surface2 text-ink;
+  }
+  .bubble-them {
+    @apply bubble bg-surface text-ink2;
+  }
+  .bubble-tail-me {
+    /* Last bubble of my own block — squared bottom-right corner points at
+       my avatar / send-input area on the right. */
+    border-bottom-right-radius: 2px;
+  }
+  .bubble-tail-them {
+    /* Last bubble of the buyer's block — squared bottom-left corner points
+       at their avatar on the left. */
+    border-bottom-left-radius: 2px;
+  }
+
+  /*
+   * Centered system / support / autoreply card. Uses CSS custom properties
+   * (set per-theme above) instead of fixed Tailwind colors so dark and light
+   * modes both stay readable. The card uses ~14% bg tint, full fg colour,
+   * and a 35% rim border for visible contrast.
+   */
+  .msg-card {
+    @apply mx-auto max-w-[85%] rounded-lg border px-4 py-2.5 text-sm leading-relaxed
+           shadow-neu-sm whitespace-pre-wrap break-words;
+  }
+  .msg-card-system {
+    background-color: rgb(var(--c-system-bg) / 0.16);
+    color: rgb(var(--c-system-fg));
+    border-color: rgb(var(--c-system-rim) / 0.45);
+  }
+  .msg-card-support {
+    background-color: rgb(var(--c-support-bg) / 0.18);
+    color: rgb(var(--c-support-fg));
+    border-color: rgb(var(--c-support-rim) / 0.45);
+  }
+  .msg-card-autoreply-pill {
+    background-color: rgb(var(--c-autoreply-bg) / 0.18);
+    color: rgb(var(--c-autoreply-fg));
+    border-color: rgb(var(--c-autoreply-rim) / 0.45);
+  }
+
+  /* Chat list row */
+  .chat-row {
+    @apply flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-shadow
+           text-ink2 hover:text-ink hover:shadow-neu-pressed;
+  }
+  .chat-row-active {
+    @apply chat-row text-ink shadow-neu-pressed bg-surface;
+  }
+}
+
+/*
+ * Chats page grid. Three explicit columns (chat list / pane / sidebar) so
+ * the right sidebar can animate its width via `grid-template-columns`. The
+ * 0px fallback below makes this work in browsers that don't yet allow
+ * mixing `<length>` and `auto` keyframes.
+ */
+.chat-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) 300px;
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-grid[data-sidebar="closed"] {
+  grid-template-columns: 280px minmax(0, 1fr) 0px;
+}
+.chat-grid__sidebar {
+  overflow: hidden;
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    opacity 200ms ease 80ms,
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-grid[data-sidebar="closed"] .chat-grid__sidebar {
+  opacity: 0;
+  transform: translateX(20px);
+  /* No delay on close so the fade and slide complete together. */
+  transition:
+    opacity 180ms ease,
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+/*
+ * Sidebar toggle: the filled inset rect is a static glyph that always
+ * shows the "active sidebar cell". The icon itself does not animate on
+ * open/close — only the panel slides. We still keep the
+ * `.sidebar-toggle-icon` / `.sidebar-toggle-fill` class names so the
+ * rest of the JSX stays untouched.
+ */
+.sidebar-toggle .sidebar-toggle-fill {
+  opacity: 0.18;
+}
